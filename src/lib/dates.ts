@@ -62,6 +62,75 @@ export function isToday(d: Date): boolean {
   return sameDay(d, new Date());
 }
 
+/** ISO-8601 week number. */
+export function isoWeek(d: Date): number {
+  const date = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
+  const dayNum = (date.getUTCDay() + 6) % 7;
+  date.setUTCDate(date.getUTCDate() - dayNum + 3);
+  const firstThursday = new Date(Date.UTC(date.getUTCFullYear(), 0, 4));
+  const firstDayNum = (firstThursday.getUTCDay() + 6) % 7;
+  firstThursday.setUTCDate(firstThursday.getUTCDate() - firstDayNum + 3);
+  return 1 + Math.round((date.getTime() - firstThursday.getTime()) / 604_800_000);
+}
+
+/**
+ * RFC 8984 LocalDateTime + IANA zone → UTC instant, without Temporal: guess, measure the zone's
+ * offset at the guess via Intl, correct, repeat once (stabilizes across DST edges).
+ */
+export function zonedLocalToUtc(local: string, timeZone: string): Date {
+  const [dPart, tPart = "00:00:00"] = local.split("T");
+  const [y, m, d] = dPart.split("-").map(Number);
+  const [hh = 0, mm = 0, ss = 0] = tPart.split(":").map((v) => Number(v) || 0);
+  const wall = Date.UTC(y, (m ?? 1) - 1, d ?? 1, hh, mm, ss);
+
+  let fmt: Intl.DateTimeFormat;
+  try {
+    fmt = new Intl.DateTimeFormat("en-US", {
+      timeZone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: false,
+    });
+  } catch {
+    return new Date(y, (m ?? 1) - 1, d ?? 1, hh, mm, ss);
+  }
+
+  const offsetAt = (t: number): number => {
+    const parts: Record<string, number> = {};
+    for (const p of fmt.formatToParts(t)) {
+      if (p.type !== "literal") parts[p.type] = Number(p.value);
+    }
+    const asUtc = Date.UTC(
+      parts.year,
+      (parts.month ?? 1) - 1,
+      parts.day ?? 1,
+      parts.hour === 24 ? 0 : parts.hour ?? 0,
+      parts.minute ?? 0,
+      parts.second ?? 0,
+    );
+    return asUtc - t;
+  };
+
+  let t = wall - offsetAt(wall);
+  t = wall - offsetAt(t);
+  return new Date(t);
+}
+
+/** ISO-8601 duration → milliseconds (weeks/days/h/m/s; calendar-exactness not needed here). */
+export function durationToMs(duration: string): number {
+  const m = duration.match(
+    /^P(?:(\d+)W)?(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+(?:\.\d+)?)S)?)?$/,
+  );
+  if (!m) return 0;
+  const [, w, d, h, min, s] = m;
+  return ((Number(w) || 0) * 7 * 86_400 + (Number(d) || 0) * 86_400 + (Number(h) || 0) * 3_600 +
+    (Number(min) || 0) * 60 + (Number(s) || 0)) * 1000;
+}
+
 /** Minutes since local midnight of `day` for an instant, clamped to [0, 1440]. */
 export function minutesInDay(instant: Date, day: Date): number {
   const midnight = startOfDay(day).getTime();

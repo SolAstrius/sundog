@@ -9,6 +9,9 @@ async function bootstrap() {
   if (import.meta.env.DEV && location.pathname === "/__dev/login") {
     const bearer = (await (await fetch("/__dev/bearer")).text()).trim();
     if (bearer) localStorage.setItem("sundog.devBearer", bearer);
+    // Optional settings preseed for headless verification: /__dev/login?settings=<json>.
+    const preset = new URLSearchParams(location.search).get("settings");
+    if (preset) localStorage.setItem("sundog.settings", preset);
     location.replace("/");
     return;
   }

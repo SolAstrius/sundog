@@ -21,6 +21,12 @@ export interface CalendarInfo {
   isSubscribed: boolean;
   isVisible: boolean;
   sortOrder: number;
+  description: string | null;
+  timeZone: string | null;
+  includeInAvailability: string | null;
+  myRights: Record<string, boolean> | null;
+  defaultAlertsWithTime: Record<string, EventAlert> | null;
+  defaultAlertsWithoutTime: Record<string, EventAlert> | null;
 }
 
 export interface EventLocation {
@@ -53,6 +59,9 @@ export interface EventParticipant {
   participationStatus?: string;
   participationComment?: string;
   expectReply?: boolean;
+  delegatedTo?: Record<string, true>;
+  delegatedFrom?: Record<string, true>;
+  scheduleStatus?: string[];
 }
 
 export interface EventAlert {
@@ -89,6 +98,14 @@ export interface EventInstance {
   /** Hybrid organizer shapes (see core/provider/stalwart.ts normalizers). */
   replyTo?: Record<string, string>;
   organizerCalendarAddress?: string;
+  created?: string;
+  updated?: string;
+  sequence?: number;
+  categories?: Record<string, true>;
+  priority?: number;
+  relatedTo?: Record<string, { relation?: Record<string, true> }>;
+  localizations?: Record<string, Record<string, unknown>>;
+  isOrigin?: boolean;
 }
 
 export interface CalendarAccount {
@@ -124,6 +141,18 @@ export async function fetchCalendars(accountId: string): Promise<CalendarInfo[]>
     isSubscribed: c.isSubscribed !== false,
     isVisible: c.isVisible !== false,
     sortOrder: typeof c.sortOrder === "number" ? c.sortOrder : 0,
+    description: typeof c.description === "string" ? c.description : null,
+    timeZone: typeof c.timeZone === "string" ? c.timeZone : null,
+    includeInAvailability: typeof c.includeInAvailability === "string"
+      ? c.includeInAvailability
+      : null,
+    myRights: (c.myRights ?? null) as CalendarInfo["myRights"],
+    defaultAlertsWithTime: (c.defaultAlertsWithTime ?? null) as
+      | Record<string, EventAlert>
+      | null,
+    defaultAlertsWithoutTime: (c.defaultAlertsWithoutTime ?? null) as
+      | Record<string, EventAlert>
+      | null,
   })).sort((a, b) => a.sortOrder - b.sortOrder || a.name.localeCompare(b.name));
 }
 
@@ -156,6 +185,14 @@ const INSTANCE_PROPERTIES = [
   "useDefaultAlerts",
   "replyTo",
   "organizerCalendarAddress",
+  "created",
+  "updated",
+  "sequence",
+  "categories",
+  "priority",
+  "relatedTo",
+  "localizations",
+  "isOrigin",
 ];
 
 /**
@@ -261,6 +298,14 @@ function mapInstances(list: Array<Record<string, unknown>>): EventInstance[] {
       organizerCalendarAddress: typeof e.organizerCalendarAddress === "string"
         ? e.organizerCalendarAddress
         : undefined,
+      created: typeof e.created === "string" ? e.created : undefined,
+      updated: typeof e.updated === "string" ? e.updated : undefined,
+      sequence: typeof e.sequence === "number" ? e.sequence : undefined,
+      categories: e.categories as EventInstance["categories"],
+      priority: typeof e.priority === "number" ? e.priority : undefined,
+      relatedTo: e.relatedTo as EventInstance["relatedTo"],
+      localizations: e.localizations as EventInstance["localizations"],
+      isOrigin: e.isOrigin === true ? true : undefined,
     }));
 }
 
@@ -323,6 +368,74 @@ export async function searchEvents(
   ]);
   const result = expectResponse(responses, "CalendarEvent/get", "g");
   return mapInstances((result.list ?? []) as Array<Record<string, unknown>>);
+}
+
+/** Base-event detail for the popover's recurrence section (rules, overrides, relations, uid). */
+export interface BaseEventDetails {
+  id: string;
+  uid?: string;
+  timeZone?: string;
+  duration?: string;
+  title?: string;
+  calendarIds?: Record<string, true>;
+  color?: string;
+  // deno-lint-ignore no-explicit-any
+  recurrenceRules?: any[];
+  // deno-lint-ignore no-explicit-any
+  excludedRecurrenceRules?: any[];
+  recurrenceOverrides?: Record<string, Record<string, unknown>>;
+  relatedTo?: Record<string, { relation?: Record<string, true> }>;
+  [key: string]: unknown;
+}
+
+/**
+ * Fetch the stored base object (no property filter ⇒ everything except iCalComponent and the
+ * utc* conveniences — which is what permits recurrenceOverrides to be returned).
+ */
+export async function fetchBaseEvents(
+  accountId: string,
+  ids: string[],
+): Promise<BaseEventDetails[]> {
+  if (ids.length === 0) return [];
+  const responses = await request(USING_CAL, [
+    ["CalendarEvent/get", { accountId, ids }, "g"],
+  ]);
+  const result = expectResponse(responses, "CalendarEvent/get", "g");
+  return (result.list ?? []) as BaseEventDetails[];
+}
+
+/** The user's own scheduling addresses (RSVP matching, declined detection). */
+export async function fetchIdentityAddresses(accountId: string): Promise<string[]> {
+  const responses = await request(USING_CAL, [
+    ["ParticipantIdentity/get", { accountId, ids: null }, "g"],
+  ]);
+  const result = expectResponse(responses, "ParticipantIdentity/get", "g");
+  return ((result.list ?? []) as Array<{ calendarAddress?: string }>)
+    .map((identity) => identity.calendarAddress)
+    .filter((address): address is string => typeof address === "string" && address.length > 0);
+}
+
+/** Resolve a JSCalendar uid (relatedTo series links) to an event. */
+export async function fetchEventByUid(
+  accountId: string,
+  uid: string,
+  timeZone: string,
+): Promise<EventInstance | undefined> {
+  const responses = await request(USING_CAL, [
+    ["CalendarEvent/query", { accountId, filter: { uid }, limit: 1 }, "q"],
+    [
+      "CalendarEvent/get",
+      {
+        accountId,
+        "#ids": { resultOf: "q", name: "CalendarEvent/query", path: "/ids" },
+        properties: INSTANCE_PROPERTIES,
+        timeZone,
+      },
+      "g",
+    ],
+  ]);
+  const result = expectResponse(responses, "CalendarEvent/get", "g");
+  return mapInstances((result.list ?? []) as Array<Record<string, unknown>>)[0];
 }
 
 /** Cheap change probe: CalendarEvent state (ids: [] fetches nothing but returns state). */

@@ -1,8 +1,10 @@
 <script lang="ts">
   import ChevronLeft from "@lucide/svelte/icons/chevron-left";
   import ChevronRight from "@lucide/svelte/icons/chevron-right";
+  import Lock from "@lucide/svelte/icons/lock";
   import Menu from "@lucide/svelte/icons/menu";
   import SearchIcon from "@lucide/svelte/icons/search";
+  import SettingsIcon from "@lucide/svelte/icons/settings";
   import { onMount } from "svelte";
   import { logout } from "../auth/oauth.ts";
   import { buildColorMap, calendarColor, eventColor } from "../lib/colors.ts";
@@ -19,17 +21,18 @@
   import { fmtDayLong } from "../lib/format.ts";
   import { navigate, route } from "../lib/router.svelte.ts";
   import {
-    AGENDA_CHUNK_DAYS,
     app,
     applyRoute,
     initApp,
     pathFor,
     refreshAll,
+    stepAnchor,
     stopPolling,
     toggleCalendar,
     toggleKeywordFilter,
     type ViewKind,
   } from "../state/app.svelte.ts";
+  import { persistSettings, settings } from "../state/settings.svelte.ts";
   import AgendaView from "./AgendaView.svelte";
   import EventPopover from "./EventPopover.svelte";
   import MiniMonth from "./MiniMonth.svelte";
@@ -38,6 +41,7 @@
   import PlannerView from "./PlannerView.svelte";
   import { closePopover, openEvent, pop } from "./popover.svelte.ts";
   import SearchPanel from "./SearchPanel.svelte";
+  import SettingsPanel from "./SettingsPanel.svelte";
   import WeekView from "./WeekView.svelte";
   import YearView from "./YearView.svelte";
 
@@ -87,6 +91,7 @@
   const userInitial = $derived((app.username || "?").slice(0, 1).toUpperCase());
 
   let searchOpen = $state(false);
+  let settingsOpen = $state(false);
 
   /** Keyword chips harvested from the loaded window (top 12 by frequency). */
   const keywordCounts = $derived.by(() => {
@@ -107,27 +112,12 @@
     go(new Date());
   }
 
-  function step(direction: 1 | -1): Date {
-    switch (app.view) {
-      case "month":
-        return addMonths(anchorDate, direction);
-      case "agenda":
-        return addDays(anchorDate, direction * AGENDA_CHUNK_DAYS);
-      case "year":
-        return new Date(anchorDate.getFullYear() + direction, 0, 1);
-      case "planner":
-        return addDays(anchorDate, direction);
-      default:
-        return addDays(anchorDate, direction * 7);
-    }
-  }
-
   function goPrev() {
-    go(step(-1));
+    go(stepAnchor(-1));
   }
 
   function goNext() {
-    go(step(1));
+    go(stepAnchor(1));
   }
 
   function setView(view: ViewKind) {
@@ -147,6 +137,7 @@
     if (e.key === "Escape") {
       if (pop.kind !== "closed") closePopover();
       else if (searchOpen) searchOpen = false;
+      else if (settingsOpen) settingsOpen = false;
       else return;
       e.preventDefault();
       return;
@@ -237,6 +228,21 @@
       <summary aria-label="Account menu">{userInitial}</summary>
       <div class="menu">
         <p class="who">{app.username || "Signed in"}</p>
+        {#if app.identities.length}
+          <p class="who-detail">
+            {app.identities[0].replace(/^mailto:/i, "")}
+            {#if app.identities.length > 1}(+{app.identities.length - 1} more){/if}
+          </p>
+        {/if}
+        <p class="who-detail">account {app.accountId} · {Intl.DateTimeFormat().resolvedOptions()
+            .timeZone}</p>
+        <button
+          class="btn"
+          onclick={(e) => {
+            settingsOpen = true;
+            (e.currentTarget as HTMLElement).closest("details")?.removeAttribute("open");
+          }}
+        ><SettingsIcon size={13} /> Settings</button>
         <button class="btn" onclick={signOut}>Sign out</button>
       </div>
     </details>
@@ -260,7 +266,14 @@
         <section class="cals">
           <h2>Calendars</h2>
           {#each app.calendars as cal, i (cal.id)}
-            <label class="cal">
+            <label
+              class="cal"
+              title={[
+                cal.description,
+                cal.timeZone ? `Zone: ${cal.timeZone}` : "",
+                cal.myRights ? `Rights: ${Object.keys(cal.myRights).filter((r) => cal.myRights![r]).join(", ")}` : "",
+              ].filter(Boolean).join("\n") || cal.name}
+            >
               <input
                 type="checkbox"
                 checked={!app.hiddenCalendars[cal.id]}
@@ -268,6 +281,9 @@
                 style:--c={calendarColor(cal, i)}
               />
               <span class="cal-name">{cal.name}</span>
+              {#if cal.myRights && cal.myRights.mayWriteAll === false}
+                <span class="ro" title="Read-only for you"><Lock size={10} /></span>
+              {/if}
               {#if cal.isDefault}<span class="default-tag">default</span>{/if}
             </label>
           {/each}
@@ -302,6 +318,14 @@
           <label class="cal">
             <input type="checkbox" bind:checked={app.filters.showFree} />
             <span class="cal-name">Free (non-blocking)</span>
+          </label>
+          <label class="cal">
+            <input
+              type="checkbox"
+              bind:checked={settings.showDeclined}
+              onchange={persistSettings}
+            />
+            <span class="cal-name">Declined by you</span>
           </label>
         </section>
         <footer class="hints">
@@ -347,6 +371,9 @@
   <EventPopover />
   {#if searchOpen}
     <SearchPanel onclose={() => (searchOpen = false)} />
+  {/if}
+  {#if settingsOpen}
+    <SettingsPanel onclose={() => (settingsOpen = false)} />
   {/if}
 </div>
 
@@ -454,6 +481,19 @@
     margin: 0;
     font-weight: 600;
     word-break: break-all;
+  }
+
+  .who-detail {
+    margin: 0;
+    font-size: 0.72rem;
+    color: var(--ink-faint);
+    word-break: break-all;
+  }
+
+  .ro {
+    color: var(--ink-faint);
+    display: inline-flex;
+    flex-shrink: 0;
   }
 
   .toast {

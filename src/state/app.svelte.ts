@@ -5,25 +5,35 @@
  */
 import { NotAuthenticatedError } from "../auth/oauth.ts";
 import { POLL_INTERVAL_MS } from "../config.ts";
+import { stalwartProvider } from "../core/provider/stalwart.ts";
+import type { TypedEvent } from "../core/schemas/jscalendar.ts";
 import {
   type CalendarInfo,
   type EventInstance,
+  fetchBaseEvents,
   fetchCalendars,
   fetchEventState,
   fetchEventWindow,
+  fetchIdentityAddresses,
   resolveCalendarAccount,
 } from "../jmap/calendar.ts";
 import {
   addDays,
+  addMonths,
   BROWSER_TZ,
   dateKey,
+  durationToMs,
   monthGridStart,
   parseDateKey,
   startOfDay,
   startOfWeek,
   toLocalDateTime,
+  zonedLocalToUtc,
 } from "../lib/dates.ts";
 import { navigate } from "../lib/router.svelte.ts";
+import { settings } from "./settings.svelte.ts";
+
+const normalize = stalwartProvider().normalize;
 
 export type ViewKind = "week" | "month" | "agenda" | "year" | "planner";
 
@@ -42,15 +52,29 @@ function loadHidden(): Record<string, boolean> {
   }
 }
 
+/** A cancelled occurrence (override with excluded:true) rendered as a ghost slot. */
+export interface GhostSlot {
+  baseEventId: string;
+  recurrenceId: string;
+  title: string;
+  utcStart: string;
+  utcEnd: string;
+  calendarIds: Record<string, true>;
+  color?: string;
+}
+
 export const app = $state({
   ready: false,
   loading: false,
   error: "",
   accountId: "",
   username: "",
+  /** Own scheduling addresses (ParticipantIdentity) — RSVP/declined matching. */
+  identities: [] as string[],
   calendars: [] as CalendarInfo[],
   hiddenCalendars: loadHidden(),
   events: [] as EventInstance[],
+  ghosts: [] as GhostSlot[],
   view: "week" as ViewKind,
   /** Local date key "YYYY-MM-DD" anchoring the current view. */
   anchor: dateKey(new Date()),
@@ -76,6 +100,18 @@ export function toggleCalendar(id: string): void {
   localStorage.setItem(HIDDEN_KEY, JSON.stringify(app.hiddenCalendars));
 }
 
+/** The user's own RSVP status on an event (undefined when not an invitee). */
+export function ownParticipationStatus(event: EventInstance): string | undefined {
+  if (!event.participants || app.identities.length === 0) return undefined;
+  const own = normalize.ownParticipant(event as unknown as TypedEvent, app.identities);
+  if (!own) return undefined;
+  return event.participants[own.participantId]?.participationStatus ?? "needs-action";
+}
+
+export function isDeclined(event: EventInstance): boolean {
+  return ownParticipationStatus(event) === "declined";
+}
+
 /** Visible = at least one containing calendar visible AND the sidebar filters pass. */
 export function isEventVisible(event: EventInstance): boolean {
   const ids = Object.keys(event.calendarIds);
@@ -85,24 +121,33 @@ export function isEventVisible(event: EventInstance): boolean {
   if (!f.showCancelled && event.status === "cancelled") return false;
   if (!f.showDrafts && event.isDraft) return false;
   if (!f.showFree && event.freeBusyStatus === "free") return false;
+  if (!settings.showDeclined && isDeclined(event)) return false;
   const selected = Object.keys(f.keywords);
   if (selected.length && !selected.some((kw) => event.keywords?.[kw])) return false;
   return true;
 }
 
-function windowBounds(): { after: string; before: string; limit?: number } {
-  const anchorDate = parseDateKey(app.anchor);
+interface WindowBounds {
+  after: string;
+  before: string;
+  limit?: number;
+  startMs: number;
+  endMs: number;
+}
+
+function boundsFor(view: ViewKind, anchorKey: string, agendaDays: number): WindowBounds {
+  const anchorDate = parseDateKey(anchorKey);
   let start: Date;
   let end: Date;
   let limit: number | undefined;
-  switch (app.view) {
+  switch (view) {
     case "month":
       start = monthGridStart(anchorDate);
       end = addDays(start, 42);
       break;
     case "agenda":
       start = startOfDay(anchorDate);
-      end = addDays(start, app.agendaDays);
+      end = addDays(start, agendaDays);
       break;
     case "planner":
       start = startOfDay(anchorDate);
@@ -120,7 +165,34 @@ function windowBounds(): { after: string; before: string; limit?: number } {
       end = addDays(start, 7);
   }
   // Overlap semantics: `after` compares event END, `before` event START.
-  return { after: toLocalDateTime(start), before: toLocalDateTime(end), limit };
+  return {
+    after: toLocalDateTime(start),
+    before: toLocalDateTime(end),
+    limit,
+    startMs: start.getTime(),
+    endMs: end.getTime(),
+  };
+}
+
+function windowBounds(): WindowBounds {
+  return boundsFor(app.view, app.anchor, app.agendaDays);
+}
+
+/** The anchor one step away in the current view (shared by header nav and prefetch). */
+export function stepAnchor(direction: 1 | -1): Date {
+  const anchorDate = parseDateKey(app.anchor);
+  switch (app.view) {
+    case "month":
+      return addMonths(anchorDate, direction);
+    case "agenda":
+      return addDays(anchorDate, direction * AGENDA_CHUNK_DAYS);
+    case "year":
+      return new Date(anchorDate.getFullYear() + direction, 0, 1);
+    case "planner":
+      return addDays(anchorDate, direction);
+    default:
+      return addDays(anchorDate, direction * 7);
+  }
 }
 
 function describeError(err: unknown): string {
@@ -138,20 +210,134 @@ function handleAuthFailure(err: unknown): boolean {
 
 let loadSeq = 0;
 
+// Window cache: instant back/forward + idle prefetch of adjacent windows.
+const winCache = new Map<string, EventInstance[]>();
+const WIN_CACHE_MAX = 10;
+
+function cacheKey(b: WindowBounds): string {
+  return `${b.after}|${b.before}|${b.limit ?? 0}`;
+}
+
+function cachePut(key: string, events: EventInstance[]): void {
+  winCache.delete(key);
+  winCache.set(key, events);
+  while (winCache.size > WIN_CACHE_MAX) {
+    winCache.delete(winCache.keys().next().value as string);
+  }
+}
+
 export async function loadWindow(): Promise<void> {
   const seq = ++loadSeq;
+  const bounds = windowBounds();
+  const cached = winCache.get(cacheKey(bounds));
+  if (cached) {
+    // Instant paint from cache; the fresh fetch below reconciles.
+    app.events = cached;
+    void loadGhosts(cached, bounds, seq);
+  }
   app.loading = true;
   if (seq === loadSeq) app.error = "";
   try {
-    const { after, before, limit } = windowBounds();
-    const events = await fetchEventWindow(app.accountId, after, before, BROWSER_TZ, limit);
-    if (seq === loadSeq) app.events = events;
+    const events = await fetchEventWindow(
+      app.accountId,
+      bounds.after,
+      bounds.before,
+      BROWSER_TZ,
+      bounds.limit,
+    );
+    cachePut(cacheKey(bounds), events);
+    if (seq === loadSeq) {
+      app.events = events;
+      void loadGhosts(events, bounds, seq);
+      schedulePrefetch();
+    }
   } catch (err) {
     if (handleAuthFailure(err)) return;
     if (seq === loadSeq) app.error = describeError(err);
   } finally {
     if (seq === loadSeq) app.loading = false;
   }
+}
+
+/**
+ * Cancelled-occurrence ghosts: overrides with {excluded: true} never come back from expansion,
+ * but the base objects list them. Scans bases of recurring instances in the loaded window.
+ */
+async function loadGhosts(events: EventInstance[], bounds: WindowBounds, seq: number) {
+  if (app.view === "year") {
+    if (seq === loadSeq) app.ghosts = [];
+    return;
+  }
+  // A series whose only nearby occurrence is the cancelled one has no instance in THIS window —
+  // widen the base scan with the prefetched adjacent windows.
+  const neighborEvents: EventInstance[] = [];
+  for (const direction of [1, -1] as const) {
+    const nb = boundsFor(app.view, dateKey(stepAnchor(direction)), app.agendaDays);
+    neighborEvents.push(...(winCache.get(cacheKey(nb)) ?? []));
+  }
+  const baseIds = [
+    ...new Set(
+      [...events, ...neighborEvents]
+        .filter((ev) => ev.recurrenceId && ev.baseEventId)
+        .map((ev) => ev.baseEventId!),
+    ),
+  ].slice(0, 50);
+  if (baseIds.length === 0) {
+    if (seq === loadSeq) app.ghosts = [];
+    return;
+  }
+  try {
+    const bases = await fetchBaseEvents(app.accountId, baseIds);
+    const ghosts: GhostSlot[] = [];
+    for (const base of bases) {
+      const overrides = base.recurrenceOverrides ?? {};
+      const durMs = Math.max(durationToMs(base.duration ?? "PT0S"), 15 * 60_000);
+      for (const [rid, patch] of Object.entries(overrides)) {
+        if (patch?.excluded !== true) continue;
+        const start = zonedLocalToUtc(rid, base.timeZone ?? BROWSER_TZ);
+        if (start.getTime() < bounds.startMs || start.getTime() >= bounds.endMs) continue;
+        ghosts.push({
+          baseEventId: base.id,
+          recurrenceId: rid,
+          title: base.title ?? "(untitled)",
+          utcStart: start.toISOString().replace(/\.\d+Z$/, "Z"),
+          utcEnd: new Date(start.getTime() + durMs).toISOString().replace(/\.\d+Z$/, "Z"),
+          calendarIds: base.calendarIds ?? {},
+          color: typeof base.color === "string" ? base.color : undefined,
+        });
+      }
+    }
+    if (seq === loadSeq) app.ghosts = ghosts;
+  } catch {
+    if (seq === loadSeq) app.ghosts = [];
+  }
+}
+
+let prefetchTimer: ReturnType<typeof setTimeout> | undefined;
+
+function schedulePrefetch(): void {
+  if (app.view === "year") return;
+  clearTimeout(prefetchTimer);
+  const seq = loadSeq;
+  prefetchTimer = setTimeout(() => {
+    const fetches: Promise<unknown>[] = [];
+    for (const direction of [1, -1] as const) {
+      const bounds = boundsFor(app.view, dateKey(stepAnchor(direction)), app.agendaDays);
+      const key = cacheKey(bounds);
+      if (winCache.has(key)) continue;
+      fetches.push(
+        fetchEventWindow(app.accountId, bounds.after, bounds.before, BROWSER_TZ, bounds.limit)
+          .then((events) => cachePut(key, events))
+          .catch(() => {}),
+      );
+    }
+    if (fetches.length) {
+      // Neighbors may reveal cancelled occurrences whose series has no instance in view.
+      void Promise.allSettled(fetches).then(() => {
+        if (seq === loadSeq) void loadGhosts(app.events, windowBounds(), seq);
+      });
+    }
+  }, 600);
 }
 
 export async function refreshAll(): Promise<void> {
@@ -170,6 +356,10 @@ export async function initApp(): Promise<void> {
     app.accountId = accountId;
     app.username = username;
     app.calendars = await fetchCalendars(accountId);
+    // Identities enable declined-detection; non-fatal when the server withholds them.
+    fetchIdentityAddresses(accountId)
+      .then((addresses) => (app.identities = addresses))
+      .catch(() => {});
     await loadWindow();
     app.ready = true;
     startPolling();

@@ -4,6 +4,7 @@
   import Repeat from "@lucide/svelte/icons/repeat";
   import Video from "@lucide/svelte/icons/video";
   import type { EventInstance } from "../jmap/calendar.ts";
+  import { fmtSecondary } from "../lib/altcal.ts";
   import { buildColorMap, eventColor } from "../lib/colors.ts";
   import { addDays, dateKey, fmtTime, isToday, parseDateKey, startOfDay } from "../lib/dates.ts";
   import { app, extendAgenda, isEventVisible } from "../state/app.svelte.ts";
@@ -97,6 +98,9 @@
         <span class="wd">{dayFmt.format(group.day)}</span>
         <span class="num">{dateFmt.format(group.day)}</span>
         <span class="mo">{monthFmt.format(group.day)}</span>
+        {#if fmtSecondary(group.day)}
+          <span class="mo alt">{fmtSecondary(group.day)}</span>
+        {/if}
       </div>
       <div class="rows">
         {#each group.rows as row (row.ev.id)}

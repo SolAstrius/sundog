@@ -17,14 +17,18 @@
   import Video from "@lucide/svelte/icons/video";
   import X from "@lucide/svelte/icons/x";
   import type {
+    BaseEventDetails,
+    EventAlert,
     EventInstance,
     EventLink,
     EventLocation,
     EventParticipant,
   } from "../jmap/calendar.ts";
+  import { fetchBaseEvents, fetchEventByUid } from "../jmap/calendar.ts";
   import { stalwartProvider } from "../core/provider/stalwart.ts";
   import type { TypedEvent } from "../core/schemas/jscalendar.ts";
   import { downloadBlob, fetchBlobObjectUrl, fmtBytes } from "../jmap/blob.ts";
+  import { fmtSecondary } from "../lib/altcal.ts";
   import { BROWSER_TZ } from "../lib/dates.ts";
   import {
     fmtRange,
@@ -34,7 +38,10 @@
     humanizeOffset,
     linkify,
   } from "../lib/format.ts";
-  import { app } from "../state/app.svelte.ts";
+  import { downloadIcs } from "../lib/ics.ts";
+  import { describeRecurrence } from "../lib/recurrence.ts";
+  import { app, ownParticipationStatus } from "../state/app.svelte.ts";
+  import { buildColorMap, eventColor } from "../lib/colors.ts";
   import { closePopover, openEvent, pop } from "./popover.svelte.ts";
 
   const normalize = stalwartProvider().normalize;
@@ -55,10 +62,110 @@
     return `${fmtTimeInZone(s, ev.timeZone)} – ${fmtTimeInZone(e, ev.timeZone)} in ${ev.timeZone}`;
   });
 
-  const descriptionText = $derived.by(() => {
-    if (!ev?.description) return "";
-    return ev.descriptionContentType === "text/html" ? htmlToText(ev.description) : ev.description;
+  // --- localizations: language pills swap title/description --------------------------------
+
+  let lang = $state("");
+  $effect(() => {
+    void ev;
+    lang = "";
   });
+
+  const langs = $derived(Object.keys(ev?.localizations ?? {}));
+
+  function localized(field: "title" | "description"): string | undefined {
+    if (!lang || !ev?.localizations?.[lang]) return undefined;
+    const value = ev.localizations[lang][field];
+    return typeof value === "string" ? value : undefined;
+  }
+
+  const displayTitle = $derived(localized("title") ?? ev?.title ?? "");
+
+  const descriptionText = $derived.by(() => {
+    const raw = localized("description") ?? ev?.description;
+    if (!raw) return "";
+    return ev?.descriptionContentType === "text/html" ? htmlToText(raw) : raw;
+  });
+
+  // --- recurrence: lazy base fetch → human text, modified badge, series nav ------------------
+
+  let base = $state<BaseEventDetails | undefined>(undefined);
+  $effect(() => {
+    const current = ev;
+    base = undefined;
+    if (!current?.baseEventId || !current.recurrenceId) return;
+    fetchBaseEvents(app.accountId, [current.baseEventId])
+      .then((bases) => {
+        if (pop.ev === current) base = bases[0];
+      })
+      .catch(() => {});
+  });
+
+  const recurrenceLines = $derived.by(() => {
+    if (!base) return [];
+    return describeRecurrence(
+      base.recurrenceRules,
+      base.excludedRecurrenceRules,
+      base.recurrenceOverrides,
+    );
+  });
+
+  /** Override patch for THIS occurrence (non-empty and not exclusion-only ⇒ "modified"). */
+  const occurrencePatch = $derived.by(() => {
+    if (!base || !ev?.recurrenceId) return undefined;
+    const patch = base.recurrenceOverrides?.[ev.recurrenceId];
+    if (!patch || patch.excluded === true) return undefined;
+    const keys = Object.keys(patch).map((pointer) => pointer.split("/")[0]);
+    return keys.length ? [...new Set(keys)] : undefined;
+  });
+
+  /** Window siblings of this series for prev/next hops. */
+  const siblings = $derived.by(() => {
+    if (!ev?.baseEventId || !ev.recurrenceId) return [];
+    return app.events
+      .filter((e) => e.baseEventId === ev.baseEventId)
+      .toSorted((a, b) => a.utcStart.localeCompare(b.utcStart));
+  });
+
+  const siblingIndex = $derived(siblings.findIndex((e) => e.id === ev?.id));
+
+  function hop(offset: number) {
+    const target = siblings[siblingIndex + offset];
+    if (target) openEvent(target, pop.evColor);
+  }
+
+  const relatedEntries = $derived.by(() => {
+    const source = base?.relatedTo ?? ev?.relatedTo;
+    if (!source) return [];
+    return Object.entries(source).map(([uid, rel]) => ({
+      uid,
+      kind: Object.keys(rel?.relation ?? {}).join("/") || "related",
+    }));
+  });
+
+  let relatedBusy = $state(false);
+  async function openRelated(uid: string) {
+    if (relatedBusy) return;
+    relatedBusy = true;
+    try {
+      const found = await fetchEventByUid(app.accountId, uid, BROWSER_TZ);
+      if (found) openEvent(found, eventColor(found, buildColorMap(app.calendars)));
+    } finally {
+      relatedBusy = false;
+    }
+  }
+
+  // --- provenance ---------------------------------------------------------------------------
+
+  function relTime(iso: string): string {
+    const ms = Date.now() - new Date(iso).getTime();
+    const days = Math.round(ms / 86_400_000);
+    if (Math.abs(days) >= 30) return new Date(iso).toLocaleDateString();
+    if (Math.abs(days) >= 1) return `${days} d ago`;
+    const hours = Math.round(ms / 3_600_000);
+    return hours >= 1 ? `${hours} h ago` : "just now";
+  }
+
+  const ownStatus = $derived(ev ? ownParticipationStatus(ev) : undefined);
 
   interface LocEntry {
     label: string;
@@ -102,23 +209,65 @@
     display: string;
     status: string;
     isOwner: boolean;
+    kind?: string;
+    expectReply: boolean;
+    comment?: string;
+    delegatedTo: string[];
+    deliveryFailed: boolean;
   }
 
-  function participantDisplay(id: string, p: EventParticipant): PartEntry {
+  function participantName(id: string, p: EventParticipant | undefined): string {
+    if (!p) return id;
     const addr = normalize.participantAddress(id, p as never);
+    return p.name || addr.email || addr.calendarAddress || "(unknown)";
+  }
+
+  function participantDisplay(
+    id: string,
+    p: EventParticipant,
+    all: Record<string, EventParticipant>,
+  ): PartEntry {
+    // iCal statcodes: 1.x pending, 2.x delivered — anything else is a delivery problem.
+    const scheduleStatus = (p as { scheduleStatus?: string[] }).scheduleStatus ?? [];
+    const deliveryFailed = scheduleStatus.some((code) => {
+      const major = parseInt(code, 10);
+      return Number.isFinite(major) && major >= 3;
+    });
     return {
-      display: p.name || addr.email || addr.calendarAddress || "(unknown)",
+      display: participantName(id, p),
       status: p.participationStatus ?? "needs-action",
       isOwner: p.roles?.owner === true,
+      kind: p.kind,
+      expectReply: p.expectReply === true,
+      comment: p.participationComment,
+      delegatedTo: Object.keys(p.delegatedTo ?? {}).map((pid) => participantName(pid, all[pid])),
+      deliveryFailed,
     };
   }
 
   const participants = $derived.by((): PartEntry[] => {
     if (!ev?.participants) return [];
     return Object.entries(ev.participants)
-      .map(([id, p]) => participantDisplay(id, p))
+      .map(([id, p]) => participantDisplay(id, p, ev.participants!))
       .toSorted((a, b) => Number(b.isOwner) - Number(a.isOwner));
   });
+
+  // --- nerd corner ---------------------------------------------------------------------------
+
+  let copied = $state("");
+  async function copy(label: string, text: string) {
+    try {
+      await navigator.clipboard.writeText(text);
+      copied = label;
+      setTimeout(() => (copied = ""), 1500);
+    } catch {
+      // Clipboard denied — no-op.
+    }
+  }
+
+  const rawJson = $derived.by(() =>
+    ev ? JSON.stringify(base ? { instance: ev, base } : ev, null, 2) : ""
+  );
 
   const organizer = $derived.by(() => {
     if (!ev) return undefined;
@@ -126,18 +275,29 @@
     return addr?.replace(/^mailto:/i, "");
   });
 
+  function describeAlert(a: EventAlert): string {
+    const t = a.trigger;
+    let line: string;
+    if (t?.["@type"] === "AbsoluteTrigger" && t.when) line = new Date(t.when).toLocaleString();
+    else if (t?.offset) line = humanizeOffset(t.offset, t.relativeTo);
+    else line = "reminder";
+    if (a.acknowledged) line += " (dismissed)";
+    return line;
+  }
+
   const alertLines = $derived.by((): string[] => {
     if (!ev) return [];
-    if (ev.useDefaultAlerts) return ["Calendar default reminders"];
-    if (!ev.alerts) return [];
-    return Object.values(ev.alerts).map((a) => {
-      const t = a.trigger;
-      if (t?.["@type"] === "AbsoluteTrigger" && t.when) {
-        return new Date(t.when).toLocaleString();
+    if (ev.useDefaultAlerts) {
+      // Resolve the calendar's actual defaults instead of a vague placeholder.
+      const cal = app.calendars.find((c) => ev.calendarIds[c.id]);
+      const defaults = isAllDay ? cal?.defaultAlertsWithoutTime : cal?.defaultAlertsWithTime;
+      if (defaults && Object.keys(defaults).length) {
+        return Object.values(defaults).map((a) => `${describeAlert(a)} (calendar default)`);
       }
-      if (t?.offset) return humanizeOffset(t.offset, t.relativeTo);
-      return "reminder";
-    });
+      return ["Calendar default reminders"];
+    }
+    if (!ev.alerts) return [];
+    return Object.values(ev.alerts).map(describeAlert);
   });
 
   const calendarNames = $derived.by(() => {
@@ -267,7 +427,7 @@
       <header>
         <span class="swatch" aria-hidden="true"></span>
         <div class="head-main">
-          <h2 class:cancelled={ev.status === "cancelled"}>{ev.title || "(untitled)"}</h2>
+          <h2 class:cancelled={ev.status === "cancelled"}>{displayTitle || "(untitled)"}</h2>
           <p class="when">
             {range.day} · {range.time}
             {#if ev.recurrenceId}
@@ -275,13 +435,28 @@
             {/if}
           </p>
           {#if zonedTime}<p class="zoned">{zonedTime}</p>{/if}
+          {#if fmtSecondary(new Date(ev.utcStart), true)}
+            <p class="zoned">{fmtSecondary(new Date(ev.utcStart), true)}</p>
+          {/if}
+          {#if langs.length}
+            <p class="langs">
+              <button class="lang" class:active={lang === ""} onclick={() => (lang = "")}>
+                original
+              </button>
+              {#each langs as code (code)}
+                <button class="lang" class:active={lang === code} onclick={() => (lang = code)}>
+                  {code}
+                </button>
+              {/each}
+            </p>
+          {/if}
         </div>
         <button class="btn icon close" onclick={closePopover} aria-label="Close">
           <X size={16} />
         </button>
       </header>
 
-      {#if ev.isDraft || ev.status !== "confirmed" || ev.privacy === "private" || ev.privacy === "secret" || ev.freeBusyStatus === "free"}
+      {#if ev.isDraft || ev.status !== "confirmed" || ev.privacy === "private" || ev.privacy === "secret" || ev.freeBusyStatus === "free" || occurrencePatch || (ev.priority && ev.priority !== 0) || ownStatus === "declined" || ev.participants}
         <div class="badges">
           {#if ev.isDraft}<span class="badge">draft</span>{/if}
           {#if ev.status === "tentative"}<span class="badge">tentative</span>{/if}
@@ -290,10 +465,60 @@
             <span class="badge"><Lock size={10} /> {ev.privacy}</span>
           {/if}
           {#if ev.freeBusyStatus === "free"}<span class="badge">shows as free</span>{/if}
+          {#if occurrencePatch}
+            <span
+              class="badge amber"
+              title="Changed vs the series: {occurrencePatch.join(', ')}"
+            >modified occurrence</span>
+          {/if}
+          {#if ev.priority && ev.priority !== 0 && ev.priority !== 5}
+            <span class="badge" class:alert={ev.priority <= 4}>
+              {ev.priority <= 4 ? "high" : "low"} priority ({ev.priority})
+            </span>
+          {/if}
+          {#if ownStatus === "declined"}<span class="badge">you declined</span>{/if}
+          {#if ev.participants}
+            <span class="badge">{ev.isOrigin ? "you organize this" : "invited copy"}</span>
+          {/if}
         </div>
       {/if}
 
       <div class="body">
+        {#if ev.recurrenceId && (recurrenceLines.length || siblings.length > 1 || relatedEntries.length)}
+          <div class="row">
+            <span class="row-icon" aria-hidden="true"><Repeat size={15} /></span>
+            <div>
+              {#each recurrenceLines as line, i (i)}<p class="row-title rec">{line}</p>{/each}
+              {#if siblings.length > 1 && siblingIndex >= 0}
+                <p class="series-nav">
+                  Occurrence {siblingIndex + 1} of {siblings.length} in view
+                  {#if siblingIndex > 0}
+                    · <button class="linkish" onclick={() => hop(-1)}>‹ prev</button>
+                  {/if}
+                  {#if siblingIndex < siblings.length - 1}
+                    · <button class="linkish" onclick={() => hop(1)}>next ›</button>
+                  {/if}
+                </p>
+              {/if}
+              {#each relatedEntries as rel (rel.uid)}
+                <p class="series-nav">
+                  <button
+                    class="linkish"
+                    disabled={relatedBusy}
+                    onclick={() => openRelated(rel.uid)}
+                  >
+                    {rel.kind === "first"
+                      ? "continues an earlier series ›"
+                      : rel.kind === "next"
+                      ? "continued by a later series ›"
+                      : `related series (${rel.kind}) ›`}
+                  </button>
+                </p>
+              {/each}
+            </div>
+          </div>
+        {/if}
+
         {#if ev.virtualLocations}
           {#each Object.values(ev.virtualLocations) as vl, i (i)}
             {#if vl.uri}
@@ -397,11 +622,26 @@
                 {#each participants as p, i (i)}
                   {@const RsvpIcon = RSVP_ICONS[p.status] ?? Circle}
                   <li>
-                    <span class="rsvp rsvp-{p.status}" title={p.status}>
-                      <RsvpIcon size={12} />
-                    </span>
-                    {p.display}
-                    {#if p.isOwner}<span class="owner">organizer</span>{/if}
+                    <div class="person">
+                      <span class="rsvp rsvp-{p.status}" title={p.status}>
+                        <RsvpIcon size={12} />
+                      </span>
+                      {p.display}
+                      {#if p.kind && p.kind !== "individual"}
+                        <span class="owner">{p.kind}</span>
+                      {/if}
+                      {#if p.isOwner}<span class="owner">organizer</span>{/if}
+                      {#if p.expectReply && p.status === "needs-action"}
+                        <span class="owner amber-t">reply requested</span>
+                      {/if}
+                      {#if p.deliveryFailed}
+                        <span class="owner fail">invitation undelivered</span>
+                      {/if}
+                    </div>
+                    {#if p.delegatedTo.length}
+                      <p class="p-note">delegated to {p.delegatedTo.join(", ")}</p>
+                    {/if}
+                    {#if p.comment}<p class="p-note">“{p.comment}”</p>{/if}
                   </li>
                 {/each}
               </ul>
@@ -422,11 +662,15 @@
           </div>
         {/if}
 
-        {#if ev.keywords}
+        {#if ev.keywords || ev.categories}
           <div class="row">
             <span class="row-icon" aria-hidden="true"><Hash size={15} /></span>
             <p class="tags">
-              {#each Object.keys(ev.keywords) as kw (kw)}<span class="tag">{kw}</span>{/each}
+              {#each Object.keys(ev.keywords ?? {}) as kw (kw)}<span class="tag">{kw}</span
+                >{/each}
+              {#each Object.keys(ev.categories ?? {}) as cat (cat)}
+                <span class="tag cat" title={cat}>{cat.split("/").filter(Boolean).pop()}</span>
+              {/each}
             </p>
           </div>
         {/if}
@@ -437,6 +681,28 @@
             <p class="soft">{alertLines.join(" · ")}</p>
           </div>
         {/if}
+
+        <details class="nerd">
+          <summary>Details for nerds</summary>
+          <div class="nerd-body">
+            <p class="soft mono">
+              {#if ev.created}created {relTime(ev.created)} ·{/if}
+              {#if ev.updated}updated {relTime(ev.updated)} ·{/if}
+              {#if ev.sequence !== undefined}seq {ev.sequence} ·{/if}
+              id {ev.id}
+            </p>
+            <p class="nerd-actions">
+              <button class="btn" onclick={() => downloadIcs(ev, base)}>Download .ics</button>
+              <button class="btn" onclick={() => copy("uid", base?.uid ?? ev.baseEventId ?? "")}>
+                {copied === "uid" ? "Copied" : "Copy UID"}
+              </button>
+              <button class="btn" onclick={() => copy("json", rawJson)}>
+                {copied === "json" ? "Copied" : "Copy JSON"}
+              </button>
+            </p>
+            <pre class="raw">{rawJson}</pre>
+          </div>
+        </details>
       </div>
 
       {#if calendarNames.length}
@@ -587,6 +853,59 @@
     border-color: color-mix(in oklab, var(--now) 40%, var(--line));
   }
 
+  .badge.amber {
+    color: var(--amber);
+    border-color: color-mix(in oklab, var(--amber) 45%, var(--line));
+  }
+
+  .langs {
+    margin: 0.25rem 0 0;
+    display: flex;
+    gap: 0.25rem;
+  }
+
+  .lang {
+    font-size: 0.62rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    padding: 0 0.45rem;
+    color: var(--ink-soft);
+    cursor: pointer;
+  }
+
+  .lang.active {
+    background: var(--sky);
+    border-color: var(--sky);
+    color: var(--ground);
+  }
+
+  .rec {
+    font-weight: 500;
+  }
+
+  .series-nav {
+    color: var(--ink-soft);
+    font-size: 0.78rem;
+    margin-top: 0.15rem;
+  }
+
+  .linkish {
+    color: var(--sky);
+    cursor: pointer;
+    font-size: inherit;
+    padding: 0;
+  }
+
+  .linkish:hover {
+    text-decoration: underline;
+  }
+
+  .linkish:disabled {
+    opacity: 0.6;
+  }
+
   .body {
     overflow-y: auto;
     padding: 0.35rem 0.9rem 0.7rem;
@@ -699,10 +1018,31 @@
   }
 
   .people li {
+    overflow-wrap: anywhere;
+  }
+
+  .person {
     display: flex;
     align-items: baseline;
     gap: 0.45rem;
-    overflow-wrap: anywhere;
+    flex-wrap: wrap;
+  }
+
+  .p-note {
+    margin: 0 0 0 1.45rem;
+    color: var(--ink-faint);
+    font-size: 0.74rem;
+    font-style: italic;
+  }
+
+  .owner.amber-t {
+    color: var(--amber);
+    border-color: color-mix(in oklab, var(--amber) 45%, var(--line));
+  }
+
+  .owner.fail {
+    color: var(--now);
+    border-color: color-mix(in oklab, var(--now) 45%, var(--line));
   }
 
   .rsvp {
@@ -829,6 +1169,53 @@
     background: color-mix(in oklab, var(--ev, var(--amber)) 14%, var(--panel));
     border-radius: 999px;
     padding: 0.05rem 0.5rem;
+  }
+
+  .tag.cat {
+    background: color-mix(in oklab, var(--sky) 14%, var(--panel));
+  }
+
+  .nerd {
+    border-top: 1px dashed var(--line);
+    padding-top: 0.45rem;
+  }
+
+  .nerd summary {
+    font-size: 0.72rem;
+    color: var(--ink-faint);
+    cursor: pointer;
+    user-select: none;
+  }
+
+  .nerd-body {
+    display: flex;
+    flex-direction: column;
+    gap: 0.45rem;
+    padding-top: 0.45rem;
+  }
+
+  .mono {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 0.68rem;
+  }
+
+  .nerd-actions {
+    display: flex;
+    gap: 0.4rem;
+    flex-wrap: wrap;
+    margin: 0;
+  }
+
+  .raw {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 0.5rem;
+    font-size: 0.62rem;
+    line-height: 1.45;
+    max-height: 14rem;
+    overflow: auto;
+    margin: 0;
   }
 
   footer {

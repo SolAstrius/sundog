@@ -10,12 +10,17 @@
     parseDateKey,
     startOfDay,
   } from "../lib/dates.ts";
+  import { fmtSecondary } from "../lib/altcal.ts";
+  import { isoWeek } from "../lib/dates.ts";
   import { fmtDayLong } from "../lib/format.ts";
   import { navigate } from "../lib/router.svelte.ts";
-  import { app, isEventVisible, pathFor } from "../state/app.svelte.ts";
+  import { app, isDeclined, isEventVisible, pathFor } from "../state/app.svelte.ts";
+  import { settings } from "../state/settings.svelte.ts";
   import { openDay, openEvent } from "./popover.svelte.ts";
 
-  const MAX_CHIPS = 4;
+  const MAX_CHIPS = 3;
+  const MAX_BAR_LANES = 3;
+  const BAR_H = 20;
 
   const anchorDate = $derived(parseDateKey(app.anchor));
   const gridStart = $derived(monthGridStart(anchorDate));
@@ -59,6 +64,19 @@
     return map;
   });
 
+  /** Cancelled-occurrence ghosts by day key (visible calendars only). */
+  const ghostsByDay = $derived.by(() => {
+    const map = new Map<string, typeof app.ghosts>();
+    for (const g of app.ghosts) {
+      const ids = Object.keys(g.calendarIds);
+      if (ids.length && !ids.some((id) => !app.hiddenCalendars[id])) continue;
+      const key = dateKey(new Date(g.utcStart));
+      if (!map.has(key)) map.set(key, []);
+      map.get(key)!.push(g);
+    }
+    return map;
+  });
+
   function openWeek(day: Date) {
     navigate(pathFor("week", dateKey(day)));
   }
@@ -70,6 +88,76 @@
       el as Element,
     );
   }
+
+  // --- spanning bars per week row -------------------------------------------------------------
+
+  interface MonthBar {
+    ev: EventInstance;
+    startCol: number;
+    endCol: number;
+    lane: number;
+    color: string;
+    contL: boolean;
+    contR: boolean;
+  }
+
+  interface WeekRow {
+    days: Date[];
+    bars: MonthBar[];
+    laneCount: number;
+    /** Ids rendered as bars — excluded from the per-day chip stacks. */
+    barIds: Set<string>;
+  }
+
+  const weeks = $derived.by((): WeekRow[] => {
+    return Array.from({ length: 6 }, (_, w) => {
+      const days = cells.slice(w * 7, w * 7 + 7);
+      const weekStartMs = startOfDay(days[0]).getTime();
+      const weekEndMs = weekStartMs + 7 * 86_400_000;
+      const bars: MonthBar[] = [];
+      for (const ev of app.events) {
+        if (!isEventVisible(ev)) continue;
+        const start = new Date(ev.utcStart).getTime();
+        const end = Math.max(new Date(ev.utcEnd).getTime(), start + 1);
+        const allDay = ev.showWithoutTime || end - start >= 86_400_000;
+        if (!allDay) continue;
+        if (end <= weekStartMs || start >= weekEndMs) continue;
+        const startCol = Math.max(0, Math.floor((start - weekStartMs) / 86_400_000));
+        const endCol = Math.max(
+          startCol,
+          Math.min(6, Math.ceil((end - weekStartMs) / 86_400_000) - 1),
+        );
+        bars.push({
+          ev,
+          startCol,
+          endCol,
+          lane: 0,
+          color: eventColor(ev, colorMap),
+          contL: start < weekStartMs,
+          contR: end > weekEndMs,
+        });
+      }
+      bars.sort((a, b) => a.startCol - b.startCol || b.endCol - a.endCol);
+      const laneEnds: number[] = [];
+      for (const bar of bars) {
+        let lane = laneEnds.findIndex((end) => end < bar.startCol);
+        if (lane === -1) {
+          lane = laneEnds.length;
+          laneEnds.push(bar.endCol);
+        } else {
+          laneEnds[lane] = bar.endCol;
+        }
+        bar.lane = lane;
+      }
+      const shown = bars.filter((b) => b.lane < MAX_BAR_LANES);
+      return {
+        days,
+        bars: shown,
+        laneCount: Math.min(laneEnds.length, MAX_BAR_LANES),
+        barIds: new Set(shown.map((b) => b.ev.id)),
+      };
+    });
+  });
 </script>
 
 <div class="month">
@@ -79,39 +167,77 @@
     {/each}
   </div>
   <div class="grid">
-    {#each cells as day (day.getTime())}
-      {@const chips = chipsByDay.get(dateKey(day)) ?? []}
-      <div
-        class="cell"
-        class:dim={day.getMonth() !== anchorDate.getMonth()}
-        class:today={isToday(day)}
-      >
-        <button class="num" onclick={() => openWeek(day)} title="Open week view">
-          {day.getDate()}
-        </button>
-        <div class="chips">
-          {#each chips.slice(0, MAX_CHIPS) as chip (chip.ev.id)}
-            <button
-              class="chip"
-              class:allday={chip.allDay}
-              class:cancelled={chip.ev.status === "cancelled"}
-              class:draft={chip.ev.isDraft}
-              style:--ev={chip.color}
-              title={chip.ev.title}
-              onclick={(e) => openEvent(chip.ev, chip.color, e.currentTarget)}
+    {#each weeks as week, w (w)}
+      <div class="week-row" style:--bars-h="{week.laneCount * BAR_H}px">
+        {#if week.laneCount > 0}
+          <div class="bars">
+            {#each week.bars as bar (bar.ev.id + bar.startCol)}
+              <button
+                class="mbar"
+                class:cancelled={bar.ev.status === "cancelled"}
+                class:draft={bar.ev.isDraft}
+                class:cont-l={bar.contL}
+                class:cont-r={bar.contR}
+                style:--ev={bar.color}
+                style:left="calc({(bar.startCol / 7) * 100}% + 2px)"
+                style:width="calc({((bar.endCol - bar.startCol + 1) / 7) * 100}% - 5px)"
+                style:top="{bar.lane * BAR_H}px"
+                title={bar.ev.title}
+                onclick={(e) => openEvent(bar.ev, bar.color, e.currentTarget)}
+              >
+                {bar.contL ? "‹ " : ""}{bar.ev.title || "(untitled)"}{bar.contR ? " ›" : ""}
+              </button>
+            {/each}
+          </div>
+        {/if}
+        <div class="cells">
+          {#each week.days as day, dayIdx (day.getTime())}
+            {@const allChips = chipsByDay.get(dateKey(day)) ?? []}
+            {@const chips = allChips.filter((c) => !week.barIds.has(c.ev.id))}
+            <div
+              class="cell"
+              class:dim={day.getMonth() !== anchorDate.getMonth()}
+              class:today={isToday(day)}
             >
-              {#if !chip.allDay}
-                <span class="dot" aria-hidden="true"></span>
-                <span class="time">{fmtTime(new Date(chip.ev.utcStart))}</span>
-              {/if}
-              <span class="chip-title">{chip.ev.title || "(untitled)"}</span>
-            </button>
+              <div class="cell-head">
+                <button class="num" onclick={() => openWeek(day)} title="Open week view">
+                  {day.getDate()}
+                </button>
+                {#if fmtSecondary(day)}<span class="alt">{fmtSecondary(day)}</span>{/if}
+                {#if settings.weekNumbers && dayIdx === 0}
+                  <span class="wknum">W{isoWeek(day)}</span>
+                {/if}
+              </div>
+              <div class="chips">
+                {#each chips.slice(0, MAX_CHIPS) as chip (chip.ev.id)}
+                  <button
+                    class="chip"
+                    class:cancelled={chip.ev.status === "cancelled"}
+                    class:draft={chip.ev.isDraft}
+                    class:declined={isDeclined(chip.ev)}
+                    style:--ev={chip.color}
+                    title={chip.ev.title}
+                    onclick={(e) => openEvent(chip.ev, chip.color, e.currentTarget)}
+                  >
+                    <span class="dot" aria-hidden="true"></span>
+                    <span class="time">{fmtTime(new Date(chip.ev.utcStart))}</span>
+                    <span class="chip-title">{chip.ev.title || "(untitled)"}</span>
+                  </button>
+                {/each}
+                {#each ghostsByDay.get(dateKey(day)) ?? [] as g (g.baseEventId + g.recurrenceId)}
+                  <span class="chip ghostchip" title="{g.title} — this occurrence was cancelled">
+                    <span class="dot hollow" aria-hidden="true"></span>
+                    <span class="chip-title">{g.title}</span>
+                  </span>
+                {/each}
+                {#if chips.length > MAX_CHIPS}
+                  <button class="more" onclick={(e) => showAll(day, allChips, e.currentTarget)}>
+                    +{chips.length - MAX_CHIPS} more
+                  </button>
+                {/if}
+              </div>
+            </div>
           {/each}
-          {#if chips.length > MAX_CHIPS}
-            <button class="more" onclick={(e) => showAll(day, chips, e.currentTarget)}>
-              +{chips.length - MAX_CHIPS} more
-            </button>
-          {/if}
         </div>
       </div>
     {/each}
@@ -143,21 +269,134 @@
 
   .grid {
     flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+
+  .week-row {
+    flex: 1;
+    position: relative;
+    min-height: 0;
+    border-bottom: 1px solid var(--line-soft);
+    display: flex;
+  }
+
+  /* Bars overlay the strip just below the day numbers; cells reserve the space. */
+  .bars {
+    position: absolute;
+    top: 26px;
+    left: 0;
+    right: 0;
+    height: var(--bars-h, 0px);
+    z-index: 2;
+  }
+
+  .mbar {
+    position: absolute;
+    height: 18px;
+    background: var(--ev);
+    color: var(--ground);
+    border-radius: 4px;
+    font-size: 0.68rem;
+    font-weight: 600;
+    padding: 0 6px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    text-align: left;
+    cursor: pointer;
+    z-index: 2;
+  }
+
+  .mbar:hover {
+    filter: brightness(1.06);
+  }
+
+  .mbar.cont-l {
+    border-top-left-radius: 0;
+    border-bottom-left-radius: 0;
+  }
+
+  .mbar.cont-r {
+    border-top-right-radius: 0;
+    border-bottom-right-radius: 0;
+  }
+
+  .mbar.cancelled {
+    text-decoration: line-through;
+    opacity: 0.7;
+  }
+
+  .mbar.draft {
+    background: transparent;
+    border: 1px dashed var(--ev);
+    color: var(--ink);
+  }
+
+  .cells {
+    flex: 1;
     display: grid;
     grid-template-columns: repeat(7, 1fr);
-    grid-template-rows: repeat(6, minmax(0, 1fr));
     min-height: 0;
   }
 
   .cell {
     border-right: 1px solid var(--line-soft);
-    border-bottom: 1px solid var(--line-soft);
     padding: 3px 4px;
     display: flex;
     flex-direction: column;
     gap: 2px;
     min-height: 0;
     overflow: hidden;
+  }
+
+  .cell .chips {
+    margin-top: var(--bars-h, 0px);
+  }
+
+  .cell-head {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex-shrink: 0;
+  }
+
+  .alt {
+    font-size: 0.58rem;
+    color: var(--ink-faint);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+  }
+
+  .wknum {
+    margin-left: auto;
+    font-size: 0.58rem;
+    color: var(--ink-faint);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .chip.declined {
+    opacity: 0.45;
+  }
+
+  .chip.declined .chip-title {
+    text-decoration: line-through;
+  }
+
+  .ghostchip {
+    color: var(--ink-faint);
+  }
+
+  .ghostchip .chip-title {
+    text-decoration: line-through;
+  }
+
+  .dot.hollow {
+    background: transparent;
+    border: 1.5px dashed var(--ink-faint);
   }
 
   .cell.dim {

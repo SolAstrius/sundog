@@ -5,22 +5,25 @@
   import Repeat from "@lucide/svelte/icons/repeat";
   import Video from "@lucide/svelte/icons/video";
   import type { EventInstance } from "../jmap/calendar.ts";
+  import { fmtSecondary } from "../lib/altcal.ts";
   import { buildColorMap, eventColor } from "../lib/colors.ts";
   import {
     addDays,
     dateKey,
     fmtHour,
     fmtTime,
+    isoWeek,
     isToday,
     minutesInDay,
     parseDateKey,
     startOfDay,
     startOfWeek,
   } from "../lib/dates.ts";
-  import { app, isEventVisible } from "../state/app.svelte.ts";
+  import { app, isDeclined, isEventVisible } from "../state/app.svelte.ts";
+  import { settings } from "../state/settings.svelte.ts";
   import { openEvent } from "./popover.svelte.ts";
 
-  const HOUR_PX = 48;
+  const hourPx = $derived(settings.hourHeight);
 
   const weekStart = $derived(startOfWeek(parseDateKey(app.anchor)));
   const days = $derived(Array.from({ length: 7 }, (_, i) => addDays(weekStart, i)));
@@ -95,7 +98,6 @@
 
   interface DayLane {
     day: Date;
-    allDay: { ev: EventInstance; color: string }[];
     timed: Segment[];
   }
 
@@ -103,19 +105,13 @@
     return days.map((day) => {
       const dayStart = startOfDay(day).getTime();
       const dayEnd = dayStart + 86_400_000;
-      const allDay: DayLane["allDay"] = [];
       const timed: Segment[] = [];
       for (const ev of visible) {
         const start = new Date(ev.utcStart).getTime();
         const end = Math.max(new Date(ev.utcEnd).getTime(), start);
         const overlaps = start < dayEnd && (end > dayStart || (end === start && start >= dayStart));
         if (!overlaps) continue;
-        const color = eventColor(ev, colorMap);
-        const wholeDays = ev.showWithoutTime || end - start >= 86_400_000;
-        if (wholeDays) {
-          allDay.push({ ev, color });
-          continue;
-        }
+        if (ev.showWithoutTime || end - start >= 86_400_000) continue; // → spanning bars
         const startMin = minutesInDay(new Date(start), day);
         const endMin = Math.max(minutesInDay(new Date(end), day), startMin + 20);
         if (endMin <= 0 || startMin >= 1440) continue;
@@ -126,16 +122,85 @@
           col: 0,
           cols: 1,
           span: 1,
-          color,
+          color: eventColor(ev, colorMap),
           contStart: start < dayStart,
           contEnd: end > dayEnd,
         });
       }
-      return { day, allDay, timed: layoutDay(timed) };
+      return { day, timed: layoutDay(timed) };
     });
   });
 
-  const hasAllDay = $derived(lanes.some((lane) => lane.allDay.length > 0));
+  /** All-day / multi-day events as true spanning bars across the week's columns. */
+  interface AllDayBar {
+    ev: EventInstance;
+    startCol: number;
+    endCol: number;
+    lane: number;
+    color: string;
+    contL: boolean;
+    contR: boolean;
+  }
+
+  const allDayBars = $derived.by((): AllDayBar[] => {
+    const weekStartMs = startOfDay(weekStart).getTime();
+    const weekEndMs = weekStartMs + 7 * 86_400_000;
+    const bars: AllDayBar[] = [];
+    for (const ev of visible) {
+      const start = new Date(ev.utcStart).getTime();
+      const end = Math.max(new Date(ev.utcEnd).getTime(), start + 1);
+      if (!(ev.showWithoutTime || end - start >= 86_400_000)) continue;
+      if (end <= weekStartMs || start >= weekEndMs) continue;
+      const startCol = Math.max(0, Math.floor((start - weekStartMs) / 86_400_000));
+      const endCol = Math.max(
+        startCol,
+        Math.min(6, Math.ceil((end - weekStartMs) / 86_400_000) - 1),
+      );
+      bars.push({
+        ev,
+        startCol,
+        endCol,
+        lane: 0,
+        color: eventColor(ev, colorMap),
+        contL: start < weekStartMs,
+        contR: end > weekEndMs,
+      });
+    }
+    bars.sort((a, b) => a.startCol - b.startCol || b.endCol - a.endCol);
+    const laneEnds: number[] = [];
+    for (const bar of bars) {
+      let lane = laneEnds.findIndex((end) => end < bar.startCol);
+      if (lane === -1) {
+        lane = laneEnds.length;
+        laneEnds.push(bar.endCol);
+      } else {
+        laneEnds[lane] = bar.endCol;
+      }
+      bar.lane = lane;
+    }
+    return bars;
+  });
+
+  const allDayLaneCount = $derived(allDayBars.reduce((max, b) => Math.max(max, b.lane + 1), 0));
+
+  /** Cancelled-occurrence ghosts overlapping a given day (visible calendars only). */
+  function ghostsFor(day: Date) {
+    const dayStart = startOfDay(day).getTime();
+    const dayEnd = dayStart + 86_400_000;
+    return app.ghosts.filter((g) => {
+      const ids = Object.keys(g.calendarIds);
+      if (ids.length && !ids.some((id) => !app.hiddenCalendars[id])) return false;
+      const start = new Date(g.utcStart).getTime();
+      return start >= dayStart && start < dayEnd;
+    }).map((g) => ({
+      g,
+      startMin: minutesInDay(new Date(g.utcStart), day),
+      endMin: Math.max(
+        minutesInDay(new Date(g.utcEnd), day),
+        minutesInDay(new Date(g.utcStart), day) + 24,
+      ),
+    }));
+  }
 
   // Now-indicator, updated every minute.
   let now = $state(new Date());
@@ -150,7 +215,7 @@
     // Initial scroll: 07:30 vertically; horizontally center today's column when the sheet
     // overflows (narrow screens). Re-runs only when the element mounts.
     if (!scroller) return;
-    scroller.scrollTop = 7.5 * HOUR_PX;
+    scroller.scrollTop = 7.5 * hourPx;
     const today = scroller.querySelector<HTMLElement>(".day-col.today");
     if (today) {
       const target = today.offsetLeft - (scroller.clientWidth - today.offsetWidth) / 2;
@@ -159,7 +224,7 @@
   });
 
   function segHeight(seg: Segment): number {
-    return ((seg.endMin - seg.startMin) / 60) * HOUR_PX - 2;
+    return ((seg.endMin - seg.startMin) / 60) * hourPx - 2;
   }
 
   /** Density class: below ~2 lines only the title fits; below ~3 lines title+time inline. */
@@ -214,46 +279,68 @@
 
 <div class="week">
   <div class="scroll" bind:this={scroller}>
-    <div class="sheet" style:--hour-px="{HOUR_PX}px">
+    <div class="sheet" style:--hour-px="{hourPx}px">
       <div class="head">
-        <div class="corner"></div>
+        <div class="corner">
+          {#if settings.weekNumbers}<span class="wk">W{isoWeek(weekStart)}</span>{/if}
+        </div>
         {#each lanes as lane (dateKey(lane.day))}
           <div class="day-head" class:today={isToday(lane.day)}>
             <span class="wd">
               {lane.day.toLocaleDateString(undefined, { weekday: "short" })}
             </span>
             <span class="num">{lane.day.getDate()}</span>
+            {#if fmtSecondary(lane.day)}
+              <span class="alt-date">{fmtSecondary(lane.day)}</span>
+            {/if}
           </div>
         {/each}
-        {#if hasAllDay}
+        {#if allDayLaneCount > 0}
           <div class="allday-label">all-day</div>
-          {#each lanes as lane (dateKey(lane.day))}
-            <div class="allday-cell">
-              {#each lane.allDay as item (item.ev.id)}
-                <button
-                  class="allday-chip"
-                  class:cancelled={item.ev.status === "cancelled"}
-                  class:draft={item.ev.isDraft}
-                  style:--ev={item.color}
-                  title={item.ev.title}
-                  onclick={(e) => openEvent(item.ev, item.color, e.currentTarget)}
-                >
-                  {item.ev.title || "(untitled)"}
-                </button>
-              {/each}
-            </div>
-          {/each}
+          <div
+            class="allday-canvas"
+            style:height="{allDayLaneCount * 24 + 4}px"
+          >
+            {#each allDayBars as bar (bar.ev.id)}
+              <button
+                class="allday-bar"
+                class:cancelled={bar.ev.status === "cancelled"}
+                class:draft={bar.ev.isDraft}
+                class:cont-l={bar.contL}
+                class:cont-r={bar.contR}
+                style:--ev={bar.color}
+                style:left="calc({(bar.startCol / 7) * 100}% + 2px)"
+                style:width="calc({((bar.endCol - bar.startCol + 1) / 7) * 100}% - 5px)"
+                style:top="{bar.lane * 24 + 2}px"
+                title={bar.ev.title}
+                onclick={(e) => openEvent(bar.ev, bar.color, e.currentTarget)}
+              >
+                {bar.contL ? "‹ " : ""}{bar.ev.title || "(untitled)"}{bar.contR ? " ›" : ""}
+              </button>
+            {/each}
+          </div>
         {/if}
       </div>
 
       <div class="canvas">
         <div class="gutter">
           {#each Array.from({ length: 23 }, (_, i) => i + 1) as hour (hour)}
-            <span class="hour-label" style:top="{hour * HOUR_PX}px">{fmtHour(hour)}</span>
+            <span class="hour-label" style:top="{hour * hourPx}px">{fmtHour(hour)}</span>
           {/each}
         </div>
         {#each lanes as lane (dateKey(lane.day))}
           <div class="day-col" class:today={isToday(lane.day)}>
+            {#each ghostsFor(lane.day) as ghost (ghost.g.baseEventId + ghost.g.recurrenceId)}
+              <div
+                class="ghost"
+                style:top="{(ghost.startMin / 60) * hourPx}px"
+                style:height="{((ghost.endMin - ghost.startMin) / 60) * hourPx - 2}px"
+                title="{ghost.g.title} — this occurrence was cancelled"
+              >
+                <span>{ghost.g.title}</span>
+                <span class="ghost-note">cancelled</span>
+              </div>
+            {/each}
             {#each lane.timed as seg (seg.ev.id + seg.startMin)}
               {@const segGlyphs = glyphs(seg.ev)}
               <button
@@ -261,10 +348,12 @@
                 class:cancelled={seg.ev.status === "cancelled"}
                 class:tentative={seg.ev.status === "tentative"}
                 class:draft={seg.ev.isDraft}
+                class:free={seg.ev.freeBusyStatus === "free"}
+                class:declined={isDeclined(seg.ev)}
                 class:cont-start={seg.contStart}
                 class:cont-end={seg.contEnd}
                 style:--ev={seg.color}
-                style:top="{(seg.startMin / 60) * HOUR_PX}px"
+                style:top="{(seg.startMin / 60) * hourPx}px"
                 style:height="{segHeight(seg)}px"
                 style:left="calc({(seg.col / seg.cols) * 100}% + 1px)"
                 style:width="calc({(seg.span / seg.cols) * 100}% - 3px)"
@@ -302,7 +391,7 @@
               </button>
             {/each}
             {#if isToday(lane.day)}
-              <div class="now" style:top="{(nowMin / 60) * HOUR_PX}px"></div>
+              <div class="now" style:top="{(nowMin / 60) * hourPx}px"></div>
             {/if}
           </div>
         {/each}
@@ -399,31 +488,71 @@
     z-index: 13;
   }
 
-  .allday-cell {
-    border-left: 1px solid var(--line-soft);
-    border-top: 1px solid var(--line-soft);
-    padding: 2px 3px 4px;
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    min-height: 1.4rem;
-    background: var(--ground);
-    min-width: 0;
+  .wk {
+    display: block;
+    text-align: center;
+    font-size: 0.62rem;
+    color: var(--ink-faint);
+    padding-top: 0.6rem;
+    font-variant-numeric: tabular-nums;
   }
 
-  .allday-chip {
+  .alt-date {
+    font-size: 0.6rem;
+    color: var(--ink-faint);
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    padding: 0 2px;
+  }
+
+  .allday-canvas {
+    grid-column: 2 / span 7;
+    position: relative;
+    border-top: 1px solid var(--line-soft);
+    background: var(--ground);
+  }
+
+  .allday-bar {
+    position: absolute;
+    height: 20px;
     background: var(--ev);
     color: var(--ground);
     border-radius: 5px;
     font-size: 0.72rem;
     font-weight: 600;
-    padding: 1px 6px;
+    padding: 0 6px;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
     text-align: left;
-    width: 100%;
     cursor: pointer;
+  }
+
+  .allday-bar:hover {
+    filter: brightness(1.06);
+  }
+
+  .allday-bar.cont-l {
+    border-top-left-radius: 0;
+    border-bottom-left-radius: 0;
+  }
+
+  .allday-bar.cont-r {
+    border-top-right-radius: 0;
+    border-bottom-right-radius: 0;
+  }
+
+  .allday-bar.cancelled {
+    text-decoration: line-through;
+    opacity: 0.7;
+  }
+
+  .allday-bar.draft {
+    background: transparent;
+    border: 1px dashed var(--ev);
+    color: var(--ink);
   }
 
   .canvas {
@@ -561,21 +690,68 @@
     justify-content: center;
   }
 
-  .event.cancelled .ev-title,
-  .allday-chip.cancelled {
+  .event.cancelled .ev-title {
     text-decoration: line-through;
     opacity: 0.7;
   }
 
+  /* Tentative: stripes say "penciled in" without reading the badge. */
   .event.tentative {
-    opacity: 0.75;
     font-style: italic;
+    background: repeating-linear-gradient(
+      45deg,
+      color-mix(in oklab, var(--ev) 24%, var(--ground)) 0 6px,
+      color-mix(in oklab, var(--ev) 10%, var(--ground)) 6px 12px
+    );
   }
 
-  .event.draft,
-  .allday-chip.draft {
+  /* Shows-as-free: hollow card — it doesn't block time. */
+  .event.free {
+    background: var(--ground);
+    border: 1.5px solid var(--ev);
+    border-left: 3px solid var(--ev);
+  }
+
+  /* You declined this: faded + struck. */
+  .event.declined {
+    opacity: 0.45;
+  }
+
+  .event.declined .ev-title {
+    text-decoration: line-through;
+  }
+
+  .event.draft {
     border: 1px dashed var(--ev);
     border-left: 3px solid var(--ev);
+  }
+
+  .ghost {
+    position: absolute;
+    left: 2px;
+    right: 3px;
+    border: 1.5px dashed var(--line);
+    border-radius: 4px;
+    padding: 2px 6px;
+    font-size: 0.68rem;
+    color: var(--ink-faint);
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    pointer-events: auto;
+  }
+
+  .ghost span:first-child {
+    text-decoration: line-through;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .ghost-note {
+    font-size: 0.6rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
   }
 
   /* Midnight continuation: flatten + notch the crossing edge. */
