@@ -35,9 +35,12 @@ export interface EventLocation {
 
 export interface EventLink {
   href?: string;
+  /** JMAP managed attachment — download needs auth (see jmap/blob.ts). */
+  blobId?: string;
   title?: string;
   rel?: string;
   contentType?: string;
+  size?: number;
 }
 
 export interface EventParticipant {

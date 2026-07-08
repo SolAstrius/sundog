@@ -37,7 +37,7 @@ export function invalidateSession(): void {
 }
 
 /** fetch() with the bearer attached; on 401 retries once after a forced token refresh. */
-async function authedFetch(url: string, init?: RequestInit): Promise<Response> {
+export async function authedFetch(url: string, init?: RequestInit): Promise<Response> {
   const attempt = async (force: boolean) => {
     const token = await getAccessToken(force);
     return fetch(url, {

@@ -1,4 +1,6 @@
 <script lang="ts">
+  import ChevronLeft from "@lucide/svelte/icons/chevron-left";
+  import ChevronRight from "@lucide/svelte/icons/chevron-right";
   import {
     addDays,
     addMonths,
@@ -36,9 +38,11 @@
     <span class="month">{fmtMiniMonth(cursor)}</span>
     <span class="pager">
       <button onclick={() => (cursor = addMonths(cursor, -1))} aria-label="Previous month">
-        ‹
+        <ChevronLeft size={14} />
       </button>
-      <button onclick={() => (cursor = addMonths(cursor, 1))} aria-label="Next month">›</button>
+      <button onclick={() => (cursor = addMonths(cursor, 1))} aria-label="Next month">
+        <ChevronRight size={14} />
+      </button>
     </span>
   </div>
   <div class="grid" role="grid">
@@ -79,10 +83,11 @@
   }
 
   .pager button {
-    padding: 0.1rem 0.4rem;
+    padding: 0.15rem 0.3rem;
     color: var(--ink-soft);
-    font-size: 0.95rem;
     border-radius: 4px;
+    display: inline-flex;
+    align-items: center;
   }
 
   .pager button:hover {

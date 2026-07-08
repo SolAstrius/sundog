@@ -1,4 +1,9 @@
 <script lang="ts">
+  import Lock from "@lucide/svelte/icons/lock";
+  import MapPin from "@lucide/svelte/icons/map-pin";
+  import Paperclip from "@lucide/svelte/icons/paperclip";
+  import Repeat from "@lucide/svelte/icons/repeat";
+  import Video from "@lucide/svelte/icons/video";
   import type { EventInstance } from "../jmap/calendar.ts";
   import { buildColorMap, eventColor } from "../lib/colors.ts";
   import {
@@ -165,12 +170,18 @@
     return "";
   }
 
-  function glyphs(ev: EventInstance): string {
-    let out = "";
-    if (ev.recurrenceId) out += "⟳";
-    if (ev.virtualLocations && Object.values(ev.virtualLocations).some((v) => v.uri)) out += "🎥";
-    else if (ev.locations && Object.keys(ev.locations).length) out += "📍";
-    if (ev.privacy === "private" || ev.privacy === "secret") out += "🔒";
+  // deno-lint-ignore no-explicit-any
+  function glyphs(ev: EventInstance): any[] {
+    // deno-lint-ignore no-explicit-any
+    const out: any[] = [];
+    if (ev.recurrenceId) out.push(Repeat);
+    if (ev.virtualLocations && Object.values(ev.virtualLocations).some((v) => v.uri)) {
+      out.push(Video);
+    } else if (ev.locations && Object.keys(ev.locations).length) out.push(MapPin);
+    if (ev.links && Object.values(ev.links).some((l) => l.blobId || l.rel === "enclosure")) {
+      out.push(Paperclip);
+    }
+    if (ev.privacy === "private" || ev.privacy === "secret") out.push(Lock);
     return out;
   }
 
@@ -229,6 +240,7 @@
         {#each lanes as lane (dateKey(lane.day))}
           <div class="day-col" class:today={isToday(lane.day)}>
             {#each lane.timed as seg (seg.ev.id + seg.startMin)}
+              {@const segGlyphs = glyphs(seg.ev)}
               <button
                 class="event {sizeClass(seg)}"
                 class:cancelled={seg.ev.status === "cancelled"}
@@ -249,8 +261,10 @@
                   {#if sizeClass(seg) === "sm" || sizeClass(seg) === "xs"}
                     <span class="ev-time inline">{fmtTime(new Date(seg.ev.utcStart))}</span>
                   {/if}
-                  {#if glyphs(seg.ev)}
-                    <span class="ev-glyphs" aria-hidden="true">{glyphs(seg.ev)}</span>
+                  {#if segGlyphs.length}
+                    <span class="ev-glyphs" aria-hidden="true">
+                      {#each segGlyphs as G, i (i)}<G size={10} />{/each}
+                    </span>
                   {/if}
                 </span>
                 {#if !sizeClass(seg)}
@@ -469,13 +483,17 @@
     white-space: normal;
     display: -webkit-box;
     -webkit-line-clamp: 2;
+    line-clamp: 2;
     -webkit-box-orient: vertical;
   }
 
   .ev-glyphs {
     flex-shrink: 0;
-    font-size: 0.62rem;
-    opacity: 0.85;
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    opacity: 0.75;
+    align-self: center;
   }
 
   .ev-time {

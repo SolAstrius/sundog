@@ -1,4 +1,7 @@
 <script lang="ts">
+  import ChevronLeft from "@lucide/svelte/icons/chevron-left";
+  import ChevronRight from "@lucide/svelte/icons/chevron-right";
+  import Menu from "@lucide/svelte/icons/menu";
   import { onMount } from "svelte";
   import { logout } from "../auth/oauth.ts";
   import { buildColorMap, calendarColor, eventColor } from "../lib/colors.ts";
@@ -51,7 +54,8 @@
     const id = new URLSearchParams(location.search).get("open");
     deepLinkDone = true;
     if (!id) return;
-    const ev = app.events.find((e) => e.id === id);
+    // Expanded instances carry synthetic ids even for non-recurring events; accept base ids too.
+    const ev = app.events.find((e) => e.id === id || e.baseEventId === id);
     if (ev) openEvent(ev, eventColor(ev, buildColorMap(app.calendars)));
   });
 
@@ -135,15 +139,19 @@
       onclick={() => (sidebarOpen = !sidebarOpen)}
       aria-label="Toggle sidebar"
       aria-expanded={sidebarOpen}
-    >☰</button>
+    ><Menu size={17} /></button>
     <button class="brand" onclick={goToday} title="Sundog — go to today">
       <span class="mark" aria-hidden="true"><i></i><i></i><i></i></span>
       <span class="name">Sundog</span>
     </button>
     <button class="btn" onclick={goToday}>Today</button>
     <div class="chevrons">
-      <button class="btn icon" onclick={goPrev} aria-label="Previous {app.view}">‹</button>
-      <button class="btn icon" onclick={goNext} aria-label="Next {app.view}">›</button>
+      <button class="btn icon" onclick={goPrev} aria-label="Previous {app.view}">
+        <ChevronLeft size={17} />
+      </button>
+      <button class="btn icon" onclick={goNext} aria-label="Next {app.view}">
+        <ChevronRight size={17} />
+      </button>
     </div>
     <h1 class="title">{title}</h1>
     {#if app.loading}

@@ -1,6 +1,7 @@
 {
   "version": "5",
   "specifiers": {
+    "npm:@lucide/svelte@0.525": "0.525.0_svelte@5.56.4",
     "npm:@sveltejs/vite-plugin-svelte@^5.1.0": "5.1.1_svelte@5.56.4_vite@6.4.3",
     "npm:svelte-check@*": "4.7.1_svelte@5.56.4_typescript@6.0.3",
     "npm:svelte@^5.35.0": "5.56.4",
@@ -164,6 +165,12 @@
       "dependencies": [
         "@jridgewell/resolve-uri",
         "@jridgewell/sourcemap-codec"
+      ]
+    },
+    "@lucide/svelte@0.525.0_svelte@5.56.4": {
+      "integrity": "sha512-dyUxkXzepagLUzL8jHQNdeH286nC66ClLACsg+Neu/bjkRJWPWMzkT+H0DKlE70QdkicGCfs1ZGmXCc351hmZA==",
+      "dependencies": [
+        "svelte"
       ]
     },
     "@rollup/rollup-android-arm-eabi@4.62.2": {
@@ -584,6 +591,7 @@
   "workspace": {
     "packageJson": {
       "dependencies": [
+        "npm:@lucide/svelte@0.525",
         "npm:@sveltejs/vite-plugin-svelte@^5.1.0",
         "npm:svelte@^5.35.0",
         "npm:vite@^6.3.0",

@@ -1,7 +1,30 @@
 <script lang="ts">
-  import type { EventInstance, EventLocation, EventParticipant } from "../jmap/calendar.ts";
+  import AlignLeft from "@lucide/svelte/icons/align-left";
+  import ArrowRight from "@lucide/svelte/icons/arrow-right";
+  import Bell from "@lucide/svelte/icons/bell";
+  import Check from "@lucide/svelte/icons/check";
+  import Circle from "@lucide/svelte/icons/circle";
+  import CircleHelp from "@lucide/svelte/icons/circle-help";
+  import Download from "@lucide/svelte/icons/download";
+  import FileText from "@lucide/svelte/icons/file-text";
+  import Hash from "@lucide/svelte/icons/hash";
+  import LinkIcon from "@lucide/svelte/icons/link";
+  import Lock from "@lucide/svelte/icons/lock";
+  import MapPin from "@lucide/svelte/icons/map-pin";
+  import Paperclip from "@lucide/svelte/icons/paperclip";
+  import Repeat from "@lucide/svelte/icons/repeat";
+  import Users from "@lucide/svelte/icons/users";
+  import Video from "@lucide/svelte/icons/video";
+  import X from "@lucide/svelte/icons/x";
+  import type {
+    EventInstance,
+    EventLink,
+    EventLocation,
+    EventParticipant,
+  } from "../jmap/calendar.ts";
   import { stalwartProvider } from "../core/provider/stalwart.ts";
   import type { TypedEvent } from "../core/schemas/jscalendar.ts";
+  import { downloadBlob, fetchBlobObjectUrl, fmtBytes } from "../jmap/blob.ts";
   import { BROWSER_TZ } from "../lib/dates.ts";
   import {
     fmtRange,
@@ -66,18 +89,18 @@
     });
   });
 
-  const STATUS_GLYPH: Record<string, string> = {
-    accepted: "✓",
-    declined: "✕",
-    tentative: "~",
-    delegated: "→",
-    "needs-action": "·",
+  // deno-lint-ignore no-explicit-any
+  const RSVP_ICONS: Record<string, any> = {
+    accepted: Check,
+    declined: X,
+    tentative: CircleHelp,
+    delegated: ArrowRight,
+    "needs-action": Circle,
   };
 
   interface PartEntry {
     display: string;
     status: string;
-    glyph: string;
     isOwner: boolean;
   }
 
@@ -86,7 +109,6 @@
     return {
       display: p.name || addr.email || addr.calendarAddress || "(unknown)",
       status: p.participationStatus ?? "needs-action",
-      glyph: STATUS_GLYPH[p.participationStatus ?? "needs-action"] ?? "·",
       isOwner: p.roles?.owner === true,
     };
   }
@@ -124,6 +146,88 @@
       .map((id) => app.calendars.find((c) => c.id === id)?.name)
       .filter((name): name is string => !!name);
   });
+
+  // --- attachments (file display) ---------------------------------------------------------
+
+  interface Attachment {
+    key: string;
+    name: string;
+    contentType?: string;
+    size?: number;
+    href?: string;
+    blobId?: string;
+    isImage: boolean;
+  }
+
+  /** Enclosures and blob-backed links are files; everything else with an href is a plain link. */
+  const attachments = $derived.by((): Attachment[] => {
+    if (!ev?.links) return [];
+    return Object.entries(ev.links)
+      .filter(([, l]) => l.blobId || l.rel === "enclosure")
+      .map(([key, l]) => ({
+        key,
+        name: l.title || key,
+        contentType: l.contentType ?? undefined,
+        size: l.size,
+        href: l.href,
+        blobId: l.blobId ?? undefined,
+        isImage: (l.contentType ?? "").startsWith("image/"),
+      }));
+  });
+
+  const plainLinks = $derived.by((): EventLink[] => {
+    if (!ev?.links) return [];
+    return Object.values(ev.links).filter((l) => l.href && !l.blobId && l.rel !== "enclosure");
+  });
+
+  function linkDisplay(l: EventLink): string {
+    if (l.title) return l.title;
+    try {
+      const u = new URL(l.href!);
+      return u.host + (u.pathname.length > 1 ? u.pathname.slice(0, 24) : "");
+    } catch {
+      return l.href ?? "link";
+    }
+  }
+
+  /** Blob-image thumbnails, fetched with auth into object URLs; revoked when the event changes. */
+  let thumbs = $state<Record<string, string>>({});
+  $effect(() => {
+    const atts = attachments;
+    thumbs = {};
+    let alive = true;
+    const created: string[] = [];
+    for (const att of atts) {
+      if (!att.isImage || !att.blobId) continue;
+      fetchBlobObjectUrl(app.accountId, att.blobId, att.name, att.contentType)
+        .then((url) => {
+          if (!alive) {
+            URL.revokeObjectURL(url);
+            return;
+          }
+          created.push(url);
+          thumbs = { ...thumbs, [att.key]: url };
+        })
+        .catch(() => {});
+    }
+    return () => {
+      alive = false;
+      for (const url of created) URL.revokeObjectURL(url);
+    };
+  });
+
+  let downloading = $state<Record<string, boolean>>({});
+  async function download(att: Attachment): Promise<void> {
+    if (!att.blobId || downloading[att.key]) return;
+    downloading = { ...downloading, [att.key]: true };
+    try {
+      await downloadBlob(app.accountId, att.blobId, att.name, att.contentType);
+    } catch {
+      // Non-fatal: leave the button enabled for a retry.
+    } finally {
+      downloading = { ...downloading, [att.key]: false };
+    }
+  }
 
   // --- positioning ------------------------------------------------------------------------
 
@@ -166,12 +270,15 @@
           <h2 class:cancelled={ev.status === "cancelled"}>{ev.title || "(untitled)"}</h2>
           <p class="when">
             {range.day} · {range.time}
-            {#if ev.recurrenceId}<span class="recur" title="Part of a recurring series">⟳</span
-              >{/if}
+            {#if ev.recurrenceId}
+              <span class="recur" title="Part of a recurring series"><Repeat size={12} /></span>
+            {/if}
           </p>
           {#if zonedTime}<p class="zoned">{zonedTime}</p>{/if}
         </div>
-        <button class="btn icon close" onclick={closePopover} aria-label="Close">✕</button>
+        <button class="btn icon close" onclick={closePopover} aria-label="Close">
+          <X size={16} />
+        </button>
       </header>
 
       {#if ev.isDraft || ev.status !== "confirmed" || ev.privacy === "private" || ev.privacy === "secret" || ev.freeBusyStatus === "free"}
@@ -180,7 +287,7 @@
           {#if ev.status === "tentative"}<span class="badge">tentative</span>{/if}
           {#if ev.status === "cancelled"}<span class="badge alert">cancelled</span>{/if}
           {#if ev.privacy === "private" || ev.privacy === "secret"}
-            <span class="badge">🔒 {ev.privacy}</span>
+            <span class="badge"><Lock size={10} /> {ev.privacy}</span>
           {/if}
           {#if ev.freeBusyStatus === "free"}<span class="badge">shows as free</span>{/if}
         </div>
@@ -191,7 +298,7 @@
           {#each Object.values(ev.virtualLocations) as vl, i (i)}
             {#if vl.uri}
               <div class="row">
-                <span class="row-icon" aria-hidden="true">🎥</span>
+                <span class="row-icon" aria-hidden="true"><Video size={15} /></span>
                 <div>
                   <a class="join" href={vl.uri} target="_blank" rel="noopener noreferrer">
                     Join {vl.name || "video call"}
@@ -205,7 +312,7 @@
 
         {#each locationEntries as entry, i (i)}
           <div class="row">
-            <span class="row-icon" aria-hidden="true">📍</span>
+            <span class="row-icon" aria-hidden="true"><MapPin size={15} /></span>
             <div>
               <p class="row-title">
                 {#if entry.label !== "Location"}<span class="loc-label">{entry.label}</span
@@ -230,16 +337,52 @@
           </div>
         {/each}
 
-        {#if ev.links && Object.values(ev.links).some((l) => l.href)}
+        {#if attachments.length}
           <div class="row">
-            <span class="row-icon" aria-hidden="true">📎</span>
-            <p class="loc-links">
-              {#each Object.values(ev.links) as link, i (i)}
-                {#if link.href}
-                  <a href={link.href} target="_blank" rel="noopener noreferrer">
-                    {link.title || link.rel || "attachment"}
+            <span class="row-icon" aria-hidden="true"><Paperclip size={15} /></span>
+            <div class="atts">
+              {#each attachments as att (att.key)}
+                {#if att.isImage && (thumbs[att.key] || (att.href && !att.blobId))}
+                  <button
+                    class="att-img"
+                    title={att.blobId ? `Download ${att.name}` : att.name}
+                    onclick={() =>
+                    att.blobId
+                      ? download(att)
+                      : globalThis.open(att.href, "_blank", "noopener")}
+                  >
+                    <img src={thumbs[att.key] ?? att.href} alt={att.name} loading="lazy" />
+                    <span class="att-cap">
+                      {att.name}{att.size ? ` · ${fmtBytes(att.size)}` : ""}
+                    </span>
+                  </button>
+                {:else if att.blobId}
+                  <button class="att" onclick={() => download(att)} disabled={downloading[att.key]}>
+                    <Download size={13} />
+                    <span class="att-name">
+                      {downloading[att.key] ? "Downloading…" : att.name}
+                    </span>
+                    {#if att.size}<span class="att-size">{fmtBytes(att.size)}</span>{/if}
+                  </button>
+                {:else if att.href}
+                  <a class="att" href={att.href} target="_blank" rel="noopener noreferrer">
+                    <FileText size={13} />
+                    <span class="att-name">{att.name}</span>
                   </a>
                 {/if}
+              {/each}
+            </div>
+          </div>
+        {/if}
+
+        {#if plainLinks.length}
+          <div class="row">
+            <span class="row-icon" aria-hidden="true"><LinkIcon size={15} /></span>
+            <p class="loc-links">
+              {#each plainLinks as link, i (i)}
+                <a href={link.href} target="_blank" rel="noopener noreferrer">
+                  {linkDisplay(link)}
+                </a>
               {/each}
             </p>
           </div>
@@ -247,13 +390,16 @@
 
         {#if participants.length}
           <div class="row">
-            <span class="row-icon" aria-hidden="true">👥</span>
+            <span class="row-icon" aria-hidden="true"><Users size={15} /></span>
             <div>
               {#if organizer}<p class="soft">Organized by {organizer}</p>{/if}
               <ul class="people">
                 {#each participants as p, i (i)}
+                  {@const RsvpIcon = RSVP_ICONS[p.status] ?? Circle}
                   <li>
-                    <span class="rsvp rsvp-{p.status}" title={p.status}>{p.glyph}</span>
+                    <span class="rsvp rsvp-{p.status}" title={p.status}>
+                      <RsvpIcon size={12} />
+                    </span>
                     {p.display}
                     {#if p.isOwner}<span class="owner">organizer</span>{/if}
                   </li>
@@ -265,7 +411,7 @@
 
         {#if descriptionText}
           <div class="row">
-            <span class="row-icon" aria-hidden="true">≡</span>
+            <span class="row-icon" aria-hidden="true"><AlignLeft size={15} /></span>
             <p class="desc">
               {#each linkify(descriptionText) as part, i (i)}
                 {#if part.isUrl}
@@ -278,7 +424,7 @@
 
         {#if ev.keywords}
           <div class="row">
-            <span class="row-icon" aria-hidden="true">#</span>
+            <span class="row-icon" aria-hidden="true"><Hash size={15} /></span>
             <p class="tags">
               {#each Object.keys(ev.keywords) as kw (kw)}<span class="tag">{kw}</span>{/each}
             </p>
@@ -287,7 +433,7 @@
 
         {#if alertLines.length}
           <div class="row">
-            <span class="row-icon" aria-hidden="true">🔔</span>
+            <span class="row-icon" aria-hidden="true"><Bell size={15} /></span>
             <p class="soft">{alertLines.join(" · ")}</p>
           </div>
         {/if}
@@ -304,7 +450,9 @@
     <section class="panel day" style={panelStyle} role="dialog" aria-label={pop.dayLabel}>
       <header>
         <div class="head-main"><h2>{pop.dayLabel}</h2></div>
-        <button class="btn icon close" onclick={closePopover} aria-label="Close">✕</button>
+        <button class="btn icon close" onclick={closePopover} aria-label="Close">
+          <X size={16} />
+        </button>
       </header>
       <div class="body">
         <ul class="day-list">
@@ -401,7 +549,8 @@
   .recur {
     margin-left: 0.3rem;
     color: var(--amber);
-    font-weight: 700;
+    display: inline-flex;
+    vertical-align: -1px;
   }
 
   .zoned {
@@ -428,6 +577,9 @@
     padding: 0.05rem 0.5rem;
     color: var(--ink-soft);
     background: var(--panel);
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
   }
 
   .badge.alert {
@@ -453,10 +605,10 @@
   .row-icon {
     flex-shrink: 0;
     width: 1.2rem;
-    text-align: center;
+    display: flex;
+    justify-content: center;
     color: var(--ink-soft);
-    font-size: 0.85rem;
-    line-height: 1.5;
+    padding-top: 0.15rem;
   }
 
   .row > div,
@@ -499,6 +651,7 @@
   .clamp {
     display: -webkit-box;
     -webkit-line-clamp: 3;
+    line-clamp: 3;
     -webkit-box-orient: vertical;
     overflow: hidden;
   }
@@ -554,8 +707,9 @@
 
   .rsvp {
     width: 1rem;
-    text-align: center;
-    font-weight: 700;
+    display: inline-flex;
+    justify-content: center;
+    align-self: center;
     flex-shrink: 0;
   }
 
@@ -585,6 +739,83 @@
     line-height: 1.5;
     font-size: 0.83rem;
     overflow-wrap: anywhere;
+  }
+
+  .atts {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+    align-items: flex-start;
+  }
+
+  .att {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-size: 0.8rem;
+    border: 1px solid var(--line);
+    border-radius: 7px;
+    padding: 0.3rem 0.6rem;
+    background: var(--panel);
+    color: var(--ink);
+    cursor: pointer;
+    max-width: 100%;
+  }
+
+  .att:hover {
+    border-color: color-mix(in oklab, var(--ev, var(--amber)) 45%, var(--line));
+    text-decoration: none;
+  }
+
+  .att:disabled {
+    opacity: 0.6;
+    cursor: default;
+  }
+
+  .att-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .att-size {
+    color: var(--ink-faint);
+    font-size: 0.72rem;
+    flex-shrink: 0;
+  }
+
+  .att-img {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 0.3rem;
+    background: var(--panel);
+    cursor: pointer;
+    max-width: 100%;
+  }
+
+  .att-img:hover {
+    border-color: color-mix(in oklab, var(--ev, var(--amber)) 45%, var(--line));
+  }
+
+  .att-img img {
+    max-width: 16rem;
+    max-height: 9rem;
+    object-fit: cover;
+    border-radius: 5px;
+    display: block;
+  }
+
+  .att-cap {
+    font-size: 0.7rem;
+    color: var(--ink-soft);
+    text-align: left;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 16rem;
   }
 
   .tags {
