@@ -1,0 +1,174 @@
+/* Sundog global styles — parhelion palette, both themes, custom CSS throughout. */
+
+:root {
+  --ground: #faf7f0;
+  --panel: #f3eee2;
+  --raised: #ffffff;
+  --ink: #2a2620;
+  --ink-soft: #6b6353;
+  --ink-faint: #9a9182;
+  --amber: #b4691e;
+  --amber-ink: #ffffff;
+  --sky: #46708f;
+  --line: #e2daca;
+  --line-soft: #ece5d6;
+  --now: #c93b2e;
+  --shadow: 0 1px 2px rgb(42 38 32 / 0.06), 0 4px 16px rgb(42 38 32 / 0.07);
+  --focus: 0 0 0 2px var(--ground), 0 0 0 4px var(--sky);
+  --radius: 8px;
+  --font-ui:
+    "Avenir Next", Avenir, "Helvetica Neue", Seravek, system-ui, -apple-system, sans-serif;
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --ground: #14171d;
+    --panel: #1a1f27;
+    --raised: #20262f;
+    --ink: #e6e0d2;
+    --ink-soft: #9a937f;
+    --ink-faint: #6c665a;
+    --amber: #d98e3f;
+    --amber-ink: #1a1208;
+    --sky: #7fa6c4;
+    --line: #2a3038;
+    --line-soft: #232932;
+    --now: #e05c4d;
+    --shadow: 0 1px 2px rgb(0 0 0 / 0.35), 0 4px 18px rgb(0 0 0 / 0.35);
+    color-scheme: dark;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+}
+
+body {
+  background: var(--ground);
+  color: var(--ink);
+  font-family: var(--font-ui);
+  font-size: 0.9rem;
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+}
+
+#app {
+  height: 100%;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+}
+
+button:focus-visible,
+a:focus-visible,
+input:focus-visible,
+[tabindex]:focus-visible {
+  outline: none;
+  box-shadow: var(--focus);
+  border-radius: 6px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* Shared control styles (header buttons, segmented control) */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.42rem 0.85rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--raised);
+  color: var(--ink);
+  font-weight: 600;
+  font-size: 0.85rem;
+  transition: border-color 120ms, background 120ms;
+}
+
+.btn:hover {
+  border-color: var(--ink-faint);
+}
+
+.btn.icon {
+  padding: 0.42rem 0.55rem;
+  font-size: 1rem;
+  line-height: 1;
+}
+
+.btn.primary {
+  background: var(--amber);
+  border-color: var(--amber);
+  color: var(--amber-ink);
+}
+
+.seg {
+  display: inline-flex;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--raised);
+  overflow: hidden;
+}
+
+.seg button {
+  padding: 0.42rem 0.9rem;
+  font-weight: 600;
+  font-size: 0.85rem;
+  color: var(--ink-soft);
+}
+
+.seg button + button {
+  border-left: 1px solid var(--line);
+}
+
+.seg button[aria-pressed="true"] {
+  background: color-mix(in oklab, var(--amber) 16%, var(--raised));
+  color: var(--ink);
+}
+
+/* Sundog mark: sun disc + two parhelia */
+
+.mark {
+  display: inline-grid;
+  grid-auto-flow: column;
+  align-items: center;
+  gap: 3px;
+}
+
+.mark i {
+  border-radius: 50%;
+  background: var(--amber);
+}
+
+.mark i:nth-child(1),
+.mark i:nth-child(3) {
+  width: 5px;
+  height: 5px;
+  opacity: 0.65;
+}
+
+.mark i:nth-child(2) {
+  width: 14px;
+  height: 14px;
+  box-shadow: 0 0 10px color-mix(in oklab, var(--amber) 60%, transparent);
+}

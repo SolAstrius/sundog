@@ -1,0 +1,94 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: sundog
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sundog
+  namespace: sundog
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sundog
+  template:
+    metadata:
+      labels:
+        app: sundog
+    spec:
+      containers:
+        - name: sundog
+          image: registry.sol.moe/sundog:latest
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sundog
+  namespace: sundog
+  labels:
+    app: sundog
+spec:
+  type: ClusterIP
+  selector:
+    app: sundog
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: cal-astrius-ink-tls
+  namespace: sundog
+spec:
+  secretName: cal-astrius-ink-tls
+  dnsNames:
+    - cal.astrius.ink
+  issuerRef:
+    group: cert-manager.io
+    kind: ClusterIssuer
+    name: letsencrypt-dns-powerdns
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: sundog
+  namespace: sundog
+  annotations:
+    external-dns.astrius.ink/enabled: "true"
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    - kind: Rule
+      match: Host(`cal.astrius.ink`)
+      services:
+        - name: sundog
+          port: 8080
+  tls:
+    secretName: cal-astrius-ink-tls
