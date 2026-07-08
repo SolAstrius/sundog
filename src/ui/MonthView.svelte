@@ -10,8 +10,10 @@
     parseDateKey,
     startOfDay,
   } from "../lib/dates.ts";
+  import { fmtDayLong } from "../lib/format.ts";
   import { navigate } from "../lib/router.svelte.ts";
   import { app, isEventVisible, pathFor } from "../state/app.svelte.ts";
+  import { openDay, openEvent } from "./popover.svelte.ts";
 
   const MAX_CHIPS = 4;
 
@@ -60,6 +62,14 @@
   function openWeek(day: Date) {
     navigate(pathFor("week", dateKey(day)));
   }
+
+  function showAll(day: Date, chips: Chip[], el: EventTarget | null) {
+    openDay(
+      fmtDayLong(day),
+      chips.map((c) => ({ ev: c.ev, color: c.color })),
+      el as Element,
+    );
+  }
 </script>
 
 <div class="month">
@@ -81,23 +91,24 @@
         </button>
         <div class="chips">
           {#each chips.slice(0, MAX_CHIPS) as chip (chip.ev.id)}
-            <div
+            <button
               class="chip"
               class:allday={chip.allDay}
               class:cancelled={chip.ev.status === "cancelled"}
               class:draft={chip.ev.isDraft}
               style:--ev={chip.color}
               title={chip.ev.title}
+              onclick={(e) => openEvent(chip.ev, chip.color, e.currentTarget)}
             >
               {#if !chip.allDay}
                 <span class="dot" aria-hidden="true"></span>
                 <span class="time">{fmtTime(new Date(chip.ev.utcStart))}</span>
               {/if}
               <span class="chip-title">{chip.ev.title || "(untitled)"}</span>
-            </div>
+            </button>
           {/each}
           {#if chips.length > MAX_CHIPS}
-            <button class="more" onclick={() => openWeek(day)}>
+            <button class="more" onclick={(e) => showAll(day, chips, e.currentTarget)}>
               +{chips.length - MAX_CHIPS} more
             </button>
           {/if}
@@ -195,6 +206,9 @@
     border-radius: 4px;
     white-space: nowrap;
     overflow: hidden;
+    width: 100%;
+    text-align: left;
+    cursor: pointer;
   }
 
   .chip:hover {
@@ -248,5 +262,22 @@
   .more:hover {
     background: color-mix(in oklab, var(--ink) 8%, transparent);
     color: var(--ink);
+  }
+
+  /* Narrow screens: drop the time column so titles keep their room. */
+  @media (max-width: 640px) {
+    .time {
+      display: none;
+    }
+
+    .chip {
+      font-size: 0.64rem;
+    }
+
+    .num {
+      font-size: 0.7rem;
+      width: 20px;
+      height: 20px;
+    }
   }
 </style>

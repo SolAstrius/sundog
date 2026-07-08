@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { logout } from "../auth/oauth.ts";
-  import { calendarColor } from "../lib/colors.ts";
+  import { buildColorMap, calendarColor, eventColor } from "../lib/colors.ts";
   import {
     addDays,
     addMonths,
@@ -22,12 +22,15 @@
     toggleCalendar,
     type ViewKind,
   } from "../state/app.svelte.ts";
+  import EventPopover from "./EventPopover.svelte";
   import MiniMonth from "./MiniMonth.svelte";
   import MonthView from "./MonthView.svelte";
+  import { closePopover, openEvent, pop } from "./popover.svelte.ts";
   import WeekView from "./WeekView.svelte";
 
   let initError = $state("");
-  let sidebarOpen = $state(true);
+  // Overlay sidebar (narrow screens) starts closed; docked sidebar starts open.
+  let sidebarOpen = $state(globalThis.innerWidth > 760);
 
   // URL is the source of truth for view + anchor; unknown paths get canonicalized.
   $effect(() => {
@@ -39,6 +42,17 @@
       initError = err instanceof Error ? err.message : String(err);
     });
     return () => stopPolling();
+  });
+
+  // Deep link: ?open=<event id> opens the detail popover once the window is loaded.
+  let deepLinkDone = false;
+  $effect(() => {
+    if (deepLinkDone || !app.ready || app.events.length === 0) return;
+    const id = new URLSearchParams(location.search).get("open");
+    deepLinkDone = true;
+    if (!id) return;
+    const ev = app.events.find((e) => e.id === id);
+    if (ev) openEvent(ev, eventColor(ev, buildColorMap(app.calendars)));
   });
 
   const anchorDate = $derived(parseDateKey(app.anchor));
@@ -77,6 +91,13 @@
     const t = e.target as HTMLElement | null;
     if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
     if (e.metaKey || e.ctrlKey || e.altKey) return;
+    if (e.key === "Escape") {
+      if (pop.kind !== "closed") {
+        closePopover();
+        e.preventDefault();
+      }
+      return;
+    }
     switch (e.key) {
       case "t":
         goToday();
@@ -200,6 +221,8 @@
       {/if}
     </main>
   </div>
+
+  <EventPopover />
 </div>
 
 <style>

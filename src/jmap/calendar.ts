@@ -23,6 +23,40 @@ export interface CalendarInfo {
   sortOrder: number;
 }
 
+export interface EventLocation {
+  name?: string;
+  description?: string;
+  relativeTo?: "start" | "end";
+  timeZone?: string;
+  /** geo: URI. */
+  coordinates?: string;
+  links?: Record<string, EventLink>;
+}
+
+export interface EventLink {
+  href?: string;
+  title?: string;
+  rel?: string;
+  contentType?: string;
+}
+
+export interface EventParticipant {
+  name?: string;
+  email?: string;
+  calendarAddress?: string;
+  sendTo?: Record<string, string>;
+  kind?: string;
+  roles?: Record<string, true>;
+  participationStatus?: string;
+  participationComment?: string;
+  expectReply?: boolean;
+}
+
+export interface EventAlert {
+  trigger?: { "@type"?: string; offset?: string; relativeTo?: "start" | "end"; when?: string };
+  acknowledged?: string;
+}
+
 export interface EventInstance {
   id: string;
   baseEventId: string | null;
@@ -38,8 +72,20 @@ export interface EventInstance {
   calendarIds: Record<string, true>;
   color?: string;
   isDraft: boolean;
-  locations?: Record<string, { name?: string }>;
-  virtualLocations?: Record<string, { uri?: string; name?: string }>;
+  locations?: Record<string, EventLocation>;
+  virtualLocations?: Record<string, { uri?: string; name?: string; description?: string }>;
+  description?: string;
+  descriptionContentType?: string;
+  participants?: Record<string, EventParticipant>;
+  keywords?: Record<string, true>;
+  links?: Record<string, EventLink>;
+  privacy?: "public" | "private" | "secret";
+  duration?: string;
+  alerts?: Record<string, EventAlert>;
+  useDefaultAlerts?: boolean;
+  /** Hybrid organizer shapes (see core/provider/stalwart.ts normalizers). */
+  replyTo?: Record<string, string>;
+  organizerCalendarAddress?: string;
 }
 
 export interface CalendarAccount {
@@ -78,6 +124,8 @@ export async function fetchCalendars(accountId: string): Promise<CalendarInfo[]>
   })).sort((a, b) => a.sortOrder - b.sortOrder || a.name.localeCompare(b.name));
 }
 
+// NB: requesting utcStart/utcEnd forbids requesting recurrenceOverrides — we never need them
+// for display (expanded instances already have overrides applied).
 const INSTANCE_PROPERTIES = [
   "id",
   "baseEventId",
@@ -94,6 +142,17 @@ const INSTANCE_PROPERTIES = [
   "isDraft",
   "locations",
   "virtualLocations",
+  "description",
+  "descriptionContentType",
+  "participants",
+  "keywords",
+  "links",
+  "privacy",
+  "duration",
+  "alerts",
+  "useDefaultAlerts",
+  "replyTo",
+  "organizerCalendarAddress",
 ];
 
 /**
@@ -150,6 +209,21 @@ export async function fetchEventWindow(
       isDraft: e.isDraft === true,
       locations: e.locations as EventInstance["locations"],
       virtualLocations: e.virtualLocations as EventInstance["virtualLocations"],
+      description: typeof e.description === "string" ? e.description : undefined,
+      descriptionContentType: typeof e.descriptionContentType === "string"
+        ? e.descriptionContentType
+        : undefined,
+      participants: e.participants as EventInstance["participants"],
+      keywords: e.keywords as EventInstance["keywords"],
+      links: e.links as EventInstance["links"],
+      privacy: e.privacy as EventInstance["privacy"],
+      duration: typeof e.duration === "string" ? e.duration : undefined,
+      alerts: e.alerts as EventInstance["alerts"],
+      useDefaultAlerts: e.useDefaultAlerts === true,
+      replyTo: e.replyTo as EventInstance["replyTo"],
+      organizerCalendarAddress: typeof e.organizerCalendarAddress === "string"
+        ? e.organizerCalendarAddress
+        : undefined,
     }));
 }
 
