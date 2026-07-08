@@ -172,3 +172,48 @@ input:focus-visible,
   height: 14px;
   box-shadow: 0 0 10px color-mix(in oklab, var(--amber) 60%, transparent);
 }
+
+/* --- print ------------------------------------------------------------------------------- */
+@page {
+  size: A4 landscape;
+  margin: 8mm;
+}
+
+@media print {
+  :root {
+    --ground: #ffffff;
+    --panel: #ffffff;
+    --raised: #ffffff;
+    --ink: #111111;
+  }
+
+  header .btn,
+  header .seg,
+  header details.user,
+  aside,
+  .toast {
+    display: none !important;
+  }
+
+  .shell,
+  .shell .body,
+  main {
+    height: auto !important;
+    display: block !important;
+    overflow: visible !important;
+  }
+
+  .scroll,
+  .agenda,
+  .year,
+  .planner {
+    overflow: visible !important;
+    height: auto !important;
+  }
+
+  * {
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+    box-shadow: none !important;
+  }
+}

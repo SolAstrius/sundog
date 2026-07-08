@@ -9,7 +9,7 @@
  * - Expanded instances carry synthetic ids + baseEventId (base events: baseEventId == id).
  */
 import { CAPABILITIES } from "../core/jmap/session.ts";
-import { expectResponse, getSession, request } from "./client.ts";
+import { expectResponse, getSession, type MethodCall, request } from "./client.ts";
 
 const USING_CAL = [CAPABILITIES.core, CAPABILITIES.calendars];
 
@@ -162,38 +162,72 @@ const INSTANCE_PROPERTIES = [
  * Expanded instances overlapping (afterLocal, beforeLocal) — LocalDateTime strings interpreted in
  * `timeZone`. One round-trip: query + back-referenced get.
  */
+/** maxObjectsInGet — a back-referenced get past this trips `requestTooLarge`. */
+const GET_CHUNK = 500;
+
 export async function fetchEventWindow(
   accountId: string,
   afterLocal: string,
   beforeLocal: string,
   timeZone: string,
+  limit = 1000,
 ): Promise<EventInstance[]> {
-  const responses = await request(USING_CAL, [
-    [
-      "CalendarEvent/query",
-      {
-        accountId,
-        filter: { after: afterLocal, before: beforeLocal },
-        sort: [{ property: "start", isAscending: true }],
-        expandRecurrences: true,
-        timeZone,
-        limit: 1000,
-      },
-      "q",
-    ],
-    [
-      "CalendarEvent/get",
-      {
-        accountId,
-        "#ids": { resultOf: "q", name: "CalendarEvent/query", path: "/ids" },
-        properties: INSTANCE_PROPERTIES,
-        timeZone,
-      },
-      "g",
-    ],
-  ]);
-  const result = expectResponse(responses, "CalendarEvent/get", "g");
-  const list = (result.list ?? []) as Array<Record<string, unknown>>;
+  const query: MethodCall = [
+    "CalendarEvent/query",
+    {
+      accountId,
+      filter: { after: afterLocal, before: beforeLocal },
+      sort: [{ property: "start", isAscending: true }],
+      expandRecurrences: true,
+      timeZone,
+      limit,
+    },
+    "q",
+  ];
+
+  // Common case: one round-trip with a back-referenced get (safe while ≤ maxObjectsInGet).
+  if (limit <= GET_CHUNK) {
+    const responses = await request(USING_CAL, [
+      query,
+      [
+        "CalendarEvent/get",
+        {
+          accountId,
+          "#ids": { resultOf: "q", name: "CalendarEvent/query", path: "/ids" },
+          properties: INSTANCE_PROPERTIES,
+          timeZone,
+        },
+        "g",
+      ],
+    ]);
+    const result = expectResponse(responses, "CalendarEvent/get", "g");
+    return mapInstances((result.list ?? []) as Array<Record<string, unknown>>);
+  }
+
+  // Large windows (year view): query first, then chunked gets.
+  const queryResponses = await request(USING_CAL, [query]);
+  const ids = (expectResponse(queryResponses, "CalendarEvent/query", "q").ids ?? []) as string[];
+  const out: EventInstance[] = [];
+  for (let i = 0; i < ids.length; i += GET_CHUNK) {
+    const responses = await request(USING_CAL, [
+      [
+        "CalendarEvent/get",
+        {
+          accountId,
+          ids: ids.slice(i, i + GET_CHUNK),
+          properties: INSTANCE_PROPERTIES,
+          timeZone,
+        },
+        "g",
+      ],
+    ]);
+    const result = expectResponse(responses, "CalendarEvent/get", "g");
+    out.push(...mapInstances((result.list ?? []) as Array<Record<string, unknown>>));
+  }
+  return out;
+}
+
+function mapInstances(list: Array<Record<string, unknown>>): EventInstance[] {
   return list
     .filter((e) => typeof e.utcStart === "string" && typeof e.utcEnd === "string")
     .map((e) => ({
@@ -228,6 +262,67 @@ export async function fetchEventWindow(
         ? e.organizerCalendarAddress
         : undefined,
     }));
+}
+
+export interface EventSearchFilter {
+  text?: string;
+  title?: string;
+  description?: string;
+  location?: string;
+  attendee?: string;
+  owner?: string;
+}
+
+/**
+ * "собес attendee:daria title:sync" → draft-26 FilterCondition fields. Unprefixed tokens join
+ * into `text` (matches title, description, locations, participants server-side).
+ */
+export function parseSearchQuery(q: string): EventSearchFilter {
+  const filter: EventSearchFilter = {};
+  const rest: string[] = [];
+  for (const token of q.trim().split(/\s+/)) {
+    const m = token.match(/^(title|description|location|attendee|owner):(.+)$/);
+    if (m) filter[m[1] as keyof EventSearchFilter] = m[2];
+    else if (token) rest.push(token);
+  }
+  if (rest.length) filter.text = rest.join(" ");
+  return filter;
+}
+
+/**
+ * Server-side full-text search over ALL time (no expansion — recurring series match as their
+ * base event, whose utcStart is the series start). Newest first.
+ */
+export async function searchEvents(
+  accountId: string,
+  filter: EventSearchFilter,
+  timeZone: string,
+  limit = 50,
+): Promise<EventInstance[]> {
+  const responses = await request(USING_CAL, [
+    [
+      "CalendarEvent/query",
+      {
+        accountId,
+        filter,
+        sort: [{ property: "start", isAscending: false }],
+        limit,
+      },
+      "q",
+    ],
+    [
+      "CalendarEvent/get",
+      {
+        accountId,
+        "#ids": { resultOf: "q", name: "CalendarEvent/query", path: "/ids" },
+        properties: INSTANCE_PROPERTIES,
+        timeZone,
+      },
+      "g",
+    ],
+  ]);
+  const result = expectResponse(responses, "CalendarEvent/get", "g");
+  return mapInstances((result.list ?? []) as Array<Record<string, unknown>>);
 }
 
 /** Cheap change probe: CalendarEvent state (ids: [] fetches nothing but returns state). */

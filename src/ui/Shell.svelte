@@ -2,6 +2,7 @@
   import ChevronLeft from "@lucide/svelte/icons/chevron-left";
   import ChevronRight from "@lucide/svelte/icons/chevron-right";
   import Menu from "@lucide/svelte/icons/menu";
+  import SearchIcon from "@lucide/svelte/icons/search";
   import { onMount } from "svelte";
   import { logout } from "../auth/oauth.ts";
   import { buildColorMap, calendarColor, eventColor } from "../lib/colors.ts";
@@ -10,12 +11,15 @@
     addMonths,
     dateKey,
     fmtMonthTitle,
+    fmtRangeTitle,
     fmtWeekTitle,
     parseDateKey,
     startOfWeek,
   } from "../lib/dates.ts";
+  import { fmtDayLong } from "../lib/format.ts";
   import { navigate, route } from "../lib/router.svelte.ts";
   import {
+    AGENDA_CHUNK_DAYS,
     app,
     applyRoute,
     initApp,
@@ -23,13 +27,19 @@
     refreshAll,
     stopPolling,
     toggleCalendar,
+    toggleKeywordFilter,
     type ViewKind,
   } from "../state/app.svelte.ts";
+  import AgendaView from "./AgendaView.svelte";
   import EventPopover from "./EventPopover.svelte";
   import MiniMonth from "./MiniMonth.svelte";
   import MonthView from "./MonthView.svelte";
+  import NowBar from "./NowBar.svelte";
+  import PlannerView from "./PlannerView.svelte";
   import { closePopover, openEvent, pop } from "./popover.svelte.ts";
+  import SearchPanel from "./SearchPanel.svelte";
   import WeekView from "./WeekView.svelte";
+  import YearView from "./YearView.svelte";
 
   let initError = $state("");
   // Overlay sidebar (narrow screens) starts closed; docked sidebar starts open.
@@ -60,10 +70,34 @@
   });
 
   const anchorDate = $derived(parseDateKey(app.anchor));
-  const title = $derived(
-    app.view === "week" ? fmtWeekTitle(startOfWeek(anchorDate)) : fmtMonthTitle(anchorDate),
-  );
+  const title = $derived.by(() => {
+    switch (app.view) {
+      case "month":
+        return fmtMonthTitle(anchorDate);
+      case "agenda":
+        return fmtRangeTitle(anchorDate, addDays(anchorDate, app.agendaDays - 1));
+      case "year":
+        return String(anchorDate.getFullYear());
+      case "planner":
+        return fmtDayLong(anchorDate);
+      default:
+        return fmtWeekTitle(startOfWeek(anchorDate));
+    }
+  });
   const userInitial = $derived((app.username || "?").slice(0, 1).toUpperCase());
+
+  let searchOpen = $state(false);
+
+  /** Keyword chips harvested from the loaded window (top 12 by frequency). */
+  const keywordCounts = $derived.by(() => {
+    const counts = new Map<string, number>();
+    for (const ev of app.events) {
+      for (const kw of Object.keys(ev.keywords ?? {})) {
+        counts.set(kw, (counts.get(kw) ?? 0) + 1);
+      }
+    }
+    return [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 12);
+  });
 
   function go(anchor: Date, view: ViewKind = app.view) {
     navigate(pathFor(view, dateKey(anchor)));
@@ -73,12 +107,27 @@
     go(new Date());
   }
 
+  function step(direction: 1 | -1): Date {
+    switch (app.view) {
+      case "month":
+        return addMonths(anchorDate, direction);
+      case "agenda":
+        return addDays(anchorDate, direction * AGENDA_CHUNK_DAYS);
+      case "year":
+        return new Date(anchorDate.getFullYear() + direction, 0, 1);
+      case "planner":
+        return addDays(anchorDate, direction);
+      default:
+        return addDays(anchorDate, direction * 7);
+    }
+  }
+
   function goPrev() {
-    go(app.view === "week" ? addDays(anchorDate, -7) : addMonths(anchorDate, -1));
+    go(step(-1));
   }
 
   function goNext() {
-    go(app.view === "week" ? addDays(anchorDate, 7) : addMonths(anchorDate, 1));
+    go(step(1));
   }
 
   function setView(view: ViewKind) {
@@ -96,10 +145,10 @@
     if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
     if (e.metaKey || e.ctrlKey || e.altKey) return;
     if (e.key === "Escape") {
-      if (pop.kind !== "closed") {
-        closePopover();
-        e.preventDefault();
-      }
+      if (pop.kind !== "closed") closePopover();
+      else if (searchOpen) searchOpen = false;
+      else return;
+      e.preventDefault();
       return;
     }
     switch (e.key) {
@@ -119,6 +168,18 @@
         break;
       case "m":
         setView("month");
+        break;
+      case "a":
+        setView("agenda");
+        break;
+      case "y":
+        setView("year");
+        break;
+      case "d":
+        setView("planner");
+        break;
+      case "/":
+        searchOpen = true;
         break;
       case "r":
         void refreshAll();
@@ -158,9 +219,19 @@
       <span class="pulse" title="Refreshing…" aria-hidden="true"></span>
     {/if}
     <div class="spacer"></div>
+    <button class="btn icon" onclick={() => (searchOpen = true)} aria-label="Search ( / )">
+      <SearchIcon size={16} />
+    </button>
     <div class="seg" role="group" aria-label="View">
       <button aria-pressed={app.view === "week"} onclick={() => setView("week")}>Week</button>
       <button aria-pressed={app.view === "month"} onclick={() => setView("month")}>Month</button>
+      <button aria-pressed={app.view === "agenda"} onclick={() => setView("agenda")}>
+        Agenda
+      </button>
+      <button aria-pressed={app.view === "year"} onclick={() => setView("year")}>Year</button>
+      <button aria-pressed={app.view === "planner"} onclick={() => setView("planner")}>
+        Day
+      </button>
     </div>
     <details class="user">
       <summary aria-label="Account menu">{userInitial}</summary>
@@ -176,6 +247,10 @@
       <span>{app.error}</span>
       <button class="btn" onclick={() => void refreshAll()}>Retry</button>
     </div>
+  {/if}
+
+  {#if app.ready}
+    <NowBar />
   {/if}
 
   <div class="body">
@@ -197,8 +272,41 @@
             </label>
           {/each}
         </section>
+        <section class="cals">
+          <h2>Filters</h2>
+          {#if keywordCounts.length}
+            <div class="kw-chips">
+              {#each keywordCounts as [kw, count] (kw)}
+                <button
+                  class="kw"
+                  class:active={app.filters.keywords[kw]}
+                  onclick={() => toggleKeywordFilter(kw)}
+                >
+                  {kw} <span class="kw-n">{count}</span>
+                </button>
+              {/each}
+            </div>
+          {/if}
+          <label class="cal">
+            <input type="checkbox" bind:checked={app.filters.showTentative} />
+            <span class="cal-name">Tentative</span>
+          </label>
+          <label class="cal">
+            <input type="checkbox" bind:checked={app.filters.showCancelled} />
+            <span class="cal-name">Cancelled</span>
+          </label>
+          <label class="cal">
+            <input type="checkbox" bind:checked={app.filters.showDrafts} />
+            <span class="cal-name">Drafts</span>
+          </label>
+          <label class="cal">
+            <input type="checkbox" bind:checked={app.filters.showFree} />
+            <span class="cal-name">Free (non-blocking)</span>
+          </label>
+        </section>
         <footer class="hints">
-          <kbd>t</kbd> today · <kbd>j</kbd>/<kbd>k</kbd> move · <kbd>w</kbd>/<kbd>m</kbd> view
+          <kbd>t</kbd> today · <kbd>j</kbd>/<kbd>k</kbd> move · <kbd>w</kbd>
+          <kbd>m</kbd> <kbd>a</kbd> <kbd>y</kbd> <kbd>d</kbd> views · <kbd>/</kbd> search
         </footer>
       </aside>
     {/if}
@@ -224,6 +332,12 @@
         </div>
       {:else if app.view === "week"}
         <WeekView />
+      {:else if app.view === "agenda"}
+        <AgendaView />
+      {:else if app.view === "year"}
+        <YearView />
+      {:else if app.view === "planner"}
+        <PlannerView />
       {:else}
         <MonthView />
       {/if}
@@ -231,6 +345,9 @@
   </div>
 
   <EventPopover />
+  {#if searchOpen}
+    <SearchPanel onclose={() => (searchOpen = false)} />
+  {/if}
 </div>
 
 <style>
@@ -428,6 +545,39 @@
     border: 1px solid var(--line);
     border-radius: 999px;
     padding: 0 0.4rem;
+  }
+
+  .kw-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.3rem;
+    margin-bottom: 0.5rem;
+  }
+
+  .kw {
+    font-size: 0.7rem;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    padding: 0.08rem 0.55rem;
+    color: var(--ink-soft);
+    cursor: pointer;
+  }
+
+  .kw:hover {
+    border-color: var(--amber);
+    color: var(--ink);
+  }
+
+  .kw.active {
+    background: var(--amber);
+    border-color: var(--amber);
+    color: var(--amber-ink);
+    font-weight: 600;
+  }
+
+  .kw-n {
+    opacity: 0.65;
+    font-size: 0.62rem;
   }
 
   .hints {

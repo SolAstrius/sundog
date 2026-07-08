@@ -195,6 +195,21 @@
     const e = new Date(seg.ev.utcEnd);
     return `${seg.ev.title || "(untitled)"} · ${fmtTime(s)} – ${fmtTime(e)}`;
   }
+
+  /** Video-call URL, offered on the card while ongoing or within 15 min of start. */
+  function joinableUrl(ev: EventInstance): string | undefined {
+    const url = Object.values(ev.virtualLocations ?? {}).find((v) => v.uri)?.uri;
+    if (!url) return undefined;
+    const nowMs = now.getTime();
+    const start = new Date(ev.utcStart).getTime();
+    const end = new Date(ev.utcEnd).getTime();
+    return start - nowMs <= 15 * 60_000 && nowMs < end ? url : undefined;
+  }
+
+  function openJoin(e: Event, url: string) {
+    e.stopPropagation();
+    globalThis.open(url, "_blank", "noopener");
+  }
 </script>
 
 <div class="week">
@@ -274,6 +289,15 @@
                   {#if segHeight(seg) >= 92 && firstLocationName(seg.ev)}
                     <span class="ev-loc">{firstLocationName(seg.ev)}</span>
                   {/if}
+                {/if}
+                {#if joinableUrl(seg.ev)}
+                  <span
+                    class="ev-join"
+                    role="link"
+                    tabindex="0"
+                    onclick={(e) => openJoin(e, joinableUrl(seg.ev)!)}
+                    onkeydown={(e) => e.key === "Enter" && openJoin(e, joinableUrl(seg.ev)!)}
+                  >Join</span>
                 {/if}
               </button>
             {/each}
@@ -512,6 +536,22 @@
     text-overflow: ellipsis;
     white-space: nowrap;
     margin-top: 1px;
+  }
+
+  .ev-join {
+    align-self: flex-start;
+    margin-top: 2px;
+    background: var(--amber);
+    color: var(--amber-ink);
+    font-weight: 700;
+    font-size: 0.64rem;
+    border-radius: 999px;
+    padding: 0 0.5rem;
+    cursor: pointer;
+  }
+
+  .ev-join:hover {
+    filter: brightness(1.06);
   }
 
   .event.xs {

@@ -90,6 +90,11 @@ export function fmtMiniMonth(d: Date): string {
   return miniMonthFmt.format(d);
 }
 
+/** "Jul 9 – Aug 8, 2026" for arbitrary ranges (agenda title). */
+export function fmtRangeTitle(start: Date, endInclusive: Date): string {
+  return `${dayMonthFmt.format(start)} – ${dayMonthFmt.format(endInclusive)}, ${endInclusive.getFullYear()}`;
+}
+
 /** "Jul 6 – 12, 2026" (or spanning months: "Jun 29 – Jul 5, 2026"). */
 export function fmtWeekTitle(weekStart: Date): string {
   const end = addDays(weekStart, 6);
