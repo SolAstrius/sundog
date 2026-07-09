@@ -379,10 +379,16 @@ export interface BaseEventDetails {
   title?: string;
   calendarIds?: Record<string, true>;
   color?: string;
+  /** RFC 8984 plural shape. */
   // deno-lint-ignore no-explicit-any
   recurrenceRules?: any[];
   // deno-lint-ignore no-explicit-any
   excludedRecurrenceRules?: any[];
+  /** JSCalendar-bis singular shape — what Stalwart v0.16 actually serves (verified live). */
+  // deno-lint-ignore no-explicit-any
+  recurrenceRule?: any;
+  // deno-lint-ignore no-explicit-any
+  excludedRecurrenceRule?: any;
   recurrenceOverrides?: Record<string, Record<string, unknown>>;
   relatedTo?: Record<string, { relation?: Record<string, true> }>;
   [key: string]: unknown;

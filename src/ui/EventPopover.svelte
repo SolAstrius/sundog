@@ -100,13 +100,13 @@
       .catch(() => {});
   });
 
+  /** Hybrid: RFC 8984 plural arrays OR the bis singular objects Stalwart serves. */
   const recurrenceLines = $derived.by(() => {
     if (!base) return [];
-    return describeRecurrence(
-      base.recurrenceRules,
-      base.excludedRecurrenceRules,
-      base.recurrenceOverrides,
-    );
+    const rules = base.recurrenceRules ?? (base.recurrenceRule ? [base.recurrenceRule] : undefined);
+    const excluded = base.excludedRecurrenceRules ??
+      (base.excludedRecurrenceRule ? [base.excludedRecurrenceRule] : undefined);
+    return describeRecurrence(rules, excluded, base.recurrenceOverrides);
   });
 
   /** Override patch for THIS occurrence (non-empty and not exclusion-only ⇒ "modified"). */

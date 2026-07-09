@@ -40,7 +40,7 @@ function ruleToRrule(rule: RecRule): string {
 
 export function eventToIcs(
   ev: EventInstance,
-  base?: { uid?: string; recurrenceRules?: RecRule[] },
+  base?: { uid?: string; recurrenceRules?: RecRule[]; recurrenceRule?: RecRule },
 ): string {
   const lines = [
     "BEGIN:VCALENDAR",
@@ -57,7 +57,8 @@ export function eventToIcs(
   const loc = Object.values(ev.locations ?? {})[0];
   if (loc?.name) lines.push(`LOCATION:${esc(loc.name)}`);
   if (ev.status && ev.status !== "confirmed") lines.push(`STATUS:${ev.status.toUpperCase()}`);
-  for (const rule of base?.recurrenceRules ?? []) lines.push(`RRULE:${ruleToRrule(rule)}`);
+  const rules = base?.recurrenceRules ?? (base?.recurrenceRule ? [base.recurrenceRule] : []);
+  for (const rule of rules) lines.push(`RRULE:${ruleToRrule(rule)}`);
   lines.push("END:VEVENT", "END:VCALENDAR");
   return lines.join("\r\n");
 }
