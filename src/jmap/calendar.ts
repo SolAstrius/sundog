@@ -374,9 +374,14 @@ export async function searchEvents(
 export interface BaseEventDetails {
   id: string;
   uid?: string;
+  /** LocalDateTime in the event's own timeZone. */
+  start?: string;
   timeZone?: string;
   duration?: string;
   title?: string;
+  showWithoutTime?: boolean;
+  description?: string;
+  locations?: Record<string, EventLocation>;
   calendarIds?: Record<string, true>;
   color?: string;
   /** RFC 8984 plural shape. */

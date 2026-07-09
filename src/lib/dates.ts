@@ -120,6 +120,58 @@ export function zonedLocalToUtc(local: string, timeZone: string): Date {
   return new Date(t);
 }
 
+/** UTC instant → RFC 8984 LocalDateTime in an IANA zone (inverse of zonedLocalToUtc). */
+export function utcToZonedLocal(instant: Date, timeZone: string): string {
+  let fmt: Intl.DateTimeFormat;
+  try {
+    fmt = new Intl.DateTimeFormat("en-US", {
+      timeZone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: false,
+    });
+  } catch {
+    return toLocalDateTime(instant);
+  }
+  const parts: Record<string, number> = {};
+  for (const p of fmt.formatToParts(instant)) {
+    if (p.type !== "literal") parts[p.type] = Number(p.value);
+  }
+  const hour = parts.hour === 24 ? 0 : parts.hour ?? 0;
+  return `${parts.year}-${pad(parts.month ?? 1)}-${pad(parts.day ?? 1)}T${pad(hour)}:${
+    pad(parts.minute ?? 0)
+  }:${pad(parts.second ?? 0)}`;
+}
+
+/** Shift an RFC 8984 LocalDateTime by wall-clock milliseconds (no zone math — pure clock shift). */
+export function shiftLocalDateTime(local: string, deltaMs: number): string {
+  const [dPart, tPart = "00:00:00"] = local.split("T");
+  const [y, m, d] = dPart.split("-").map(Number);
+  const [hh = 0, mm = 0, ss = 0] = tPart.split(":").map((v) => Number(v) || 0);
+  const shifted = new Date(Date.UTC(y, (m ?? 1) - 1, d ?? 1, hh, mm, ss) + deltaMs);
+  return shifted.toISOString().slice(0, 19);
+}
+
+/** Milliseconds → ISO-8601 duration ("PT1H30M"; whole multiples of a day become "P2D"). */
+export function msToDuration(ms: number): string {
+  const total = Math.max(0, Math.round(ms / 1000));
+  if (total === 0) return "PT0S";
+  if (total % 86_400 === 0) return `P${total / 86_400}D`;
+  const days = Math.floor(total / 86_400);
+  const h = Math.floor((total % 86_400) / 3_600);
+  const m = Math.floor((total % 3_600) / 60);
+  const s = total % 60;
+  let out = days ? `P${days}DT` : "PT";
+  if (h) out += `${h}H`;
+  if (m) out += `${m}M`;
+  if (s) out += `${s}S`;
+  return out;
+}
+
 /** ISO-8601 duration → milliseconds (weeks/days/h/m/s; calendar-exactness not needed here). */
 export function durationToMs(duration: string): number {
   const m = duration.match(
@@ -161,7 +213,9 @@ export function fmtMiniMonth(d: Date): string {
 
 /** "Jul 9 – Aug 8, 2026" for arbitrary ranges (agenda title). */
 export function fmtRangeTitle(start: Date, endInclusive: Date): string {
-  return `${dayMonthFmt.format(start)} – ${dayMonthFmt.format(endInclusive)}, ${endInclusive.getFullYear()}`;
+  return `${dayMonthFmt.format(start)} – ${
+    dayMonthFmt.format(endInclusive)
+  }, ${endInclusive.getFullYear()}`;
 }
 
 /** "Jul 6 – 12, 2026" (or spanning months: "Jun 29 – Jul 5, 2026"). */

@@ -218,6 +218,11 @@ function cacheKey(b: WindowBounds): string {
   return `${b.after}|${b.before}|${b.limit ?? 0}`;
 }
 
+/** Drop all cached windows (mutations call this so no stale paint resurrects old state). */
+export function invalidateWinCache(): void {
+  winCache.clear();
+}
+
 function cachePut(key: string, events: EventInstance[]): void {
   winCache.delete(key);
   winCache.set(key, events);

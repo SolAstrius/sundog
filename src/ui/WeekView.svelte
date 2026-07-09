@@ -6,7 +6,7 @@
   import Video from "@lucide/svelte/icons/video";
   import type { EventInstance } from "../jmap/calendar.ts";
   import { fmtSecondary } from "../lib/altcal.ts";
-  import { buildColorMap, eventColor } from "../lib/colors.ts";
+  import { buildColorMap, calendarColor, eventColor } from "../lib/colors.ts";
   import {
     addDays,
     dateKey,
@@ -20,8 +20,9 @@
     startOfWeek,
   } from "../lib/dates.ts";
   import { app, isDeclined, isEventVisible } from "../state/app.svelte.ts";
+  import { eventWritable, mut, rescheduleInstance } from "../state/mutations.svelte.ts";
   import { settings } from "../state/settings.svelte.ts";
-  import { openEvent } from "./popover.svelte.ts";
+  import { openEditor, openEvent, type PopoverAnchor } from "./popover.svelte.ts";
 
   const hourPx = $derived(settings.hourHeight);
 
@@ -261,6 +262,188 @@
     return `${seg.ev.title || "(untitled)"} · ${fmtTime(s)} – ${fmtTime(e)}`;
   }
 
+  // --- direct manipulation: paint-to-create, drag-move, edge-resize ---------------------------
+
+  const SNAP = 15;
+
+  interface DragState {
+    mode: "create" | "move" | "resize";
+    ev?: EventInstance;
+    color: string;
+    /** Hovered column + ghost geometry (minutes within that day; move may go negative). */
+    dayKey: string;
+    startMin: number;
+    endMin: number;
+    /** Paint anchor (create) — the minute the pointer went down on. */
+    anchorMin: number;
+    /** Move: pointer-down instant minus event start (keeps the grab point under the cursor). */
+    grabOffsetMs: number;
+    moved: boolean;
+  }
+
+  let drag = $state<DragState | null>(null);
+  let suppressClick = false;
+
+  const defaultCalColor = $derived.by(() => {
+    const idx = app.calendars.findIndex((c) => c.isDefault);
+    const i = idx >= 0 ? idx : 0;
+    const cal = app.calendars[i];
+    return cal ? calendarColor(cal, i) : "var(--amber)";
+  });
+
+  const snap = (m: number) => Math.round(m / SNAP) * SNAP;
+
+  function pointInfo(e: PointerEvent): { dayKey: string; min: number; dayMs: number } | null {
+    const el = document.elementFromPoint(e.clientX, e.clientY)?.closest<HTMLElement>("[data-day]");
+    const dayKey = el?.dataset.day;
+    if (!el || !dayKey) return null;
+    const rect = el.getBoundingClientRect();
+    const min = Math.max(0, Math.min(1440, ((e.clientY - rect.top) / hourPx) * 60));
+    return { dayKey, min, dayMs: parseDateKey(dayKey).getTime() };
+  }
+
+  function onColDown(e: PointerEvent): void {
+    if (e.button !== 0 || e.pointerType === "touch" || drag || mut.busy) return;
+    if ((e.target as HTMLElement).closest("button, .ghost, .drag-ghost")) return;
+    const info = pointInfo(e);
+    if (!info) return;
+    e.preventDefault();
+    const anchor = Math.min(Math.floor(info.min / SNAP) * SNAP, 1440 - 60);
+    drag = {
+      mode: "create",
+      color: defaultCalColor,
+      dayKey: info.dayKey,
+      startMin: anchor,
+      endMin: anchor + 60,
+      anchorMin: anchor,
+      grabOffsetMs: 0,
+      moved: false,
+    };
+  }
+
+  function onChipDown(e: PointerEvent, seg: Segment): void {
+    if (e.button !== 0 || e.pointerType === "touch" || drag || mut.busy) return;
+    if (!eventWritable(seg.ev)) return;
+    const target = e.target as HTMLElement;
+    if (target.closest(".ev-join")) return;
+    const info = pointInfo(e);
+    if (!info) return;
+    e.preventDefault();
+    const pointerMs = info.dayMs + info.min * 60_000;
+    drag = {
+      mode: target.classList.contains("resize-handle") ? "resize" : "move",
+      ev: seg.ev,
+      color: seg.color,
+      dayKey: info.dayKey,
+      startMin: seg.startMin,
+      endMin: seg.endMin,
+      anchorMin: seg.startMin,
+      grabOffsetMs: pointerMs - new Date(seg.ev.utcStart).getTime(),
+      moved: false,
+    };
+  }
+
+  function onWinMove(e: PointerEvent): void {
+    if (!drag) return;
+    const info = pointInfo(e);
+    if (!info) return;
+    const d = drag;
+    if (d.mode === "create") {
+      if (info.dayKey !== d.dayKey) return; // single-day paint
+      const cur = snap(info.min);
+      const [a, b] = cur >= d.anchorMin
+        ? [d.anchorMin, Math.max(cur, d.anchorMin + SNAP)]
+        : [cur, d.anchorMin + SNAP];
+      if (a !== d.startMin || b !== d.endMin) {
+        d.startMin = a;
+        d.endMin = b;
+        d.moved = true;
+      }
+    } else if (d.mode === "move") {
+      const ev = d.ev!;
+      const durMin = (new Date(ev.utcEnd).getTime() - new Date(ev.utcStart).getTime()) / 60_000;
+      const rawStartMs = info.dayMs + info.min * 60_000 - d.grabOffsetMs;
+      const startMin = snap((rawStartMs - info.dayMs) / 60_000);
+      if (info.dayKey !== d.dayKey || startMin !== d.startMin) {
+        d.dayKey = info.dayKey;
+        d.startMin = startMin;
+        d.endMin = startMin + durMin;
+        d.moved = true;
+      }
+    } else {
+      if (info.dayKey !== d.dayKey) return; // resize stays inside the segment's day
+      const end = Math.max(snap(info.min), d.startMin + SNAP);
+      if (end !== d.endMin) {
+        d.endMin = end;
+        d.moved = true;
+      }
+    }
+  }
+
+  function ghostAnchor(d: DragState): PopoverAnchor | undefined {
+    const col = document.querySelector<HTMLElement>(`[data-day="${d.dayKey}"]`);
+    const rect = col?.getBoundingClientRect();
+    if (!rect) return undefined;
+    return {
+      x: rect.left,
+      y: rect.top + (Math.max(0, d.startMin) / 60) * hourPx,
+      w: rect.width,
+      h: ((Math.min(1440, d.endMin) - Math.max(0, d.startMin)) / 60) * hourPx,
+    };
+  }
+
+  function onWinUp(): void {
+    const d = drag;
+    if (!d) return;
+    const anchor = ghostAnchor(d);
+    drag = null;
+    const dayMs = parseDateKey(d.dayKey).getTime();
+    if (d.mode === "create") {
+      openEditor(
+        { startMs: dayMs + d.startMin * 60_000, endMs: dayMs + d.endMin * 60_000, allDay: false },
+        anchor,
+      );
+      return;
+    }
+    if (!d.moved) return; // plain click — the chip's onclick opens the detail popover
+    suppressClick = true;
+    setTimeout(() => (suppressClick = false), 0);
+    const ev = d.ev!;
+    if (d.mode === "move") {
+      const delta = dayMs + d.startMin * 60_000 - new Date(ev.utcStart).getTime();
+      if (delta !== 0) void rescheduleInstance(ev, delta);
+    } else {
+      const durMs = dayMs + d.endMin * 60_000 - new Date(ev.utcStart).getTime();
+      if (durMs > 0) void rescheduleInstance(ev, 0, durMs);
+    }
+  }
+
+  function cancelDrag(): void {
+    drag = null;
+  }
+
+  function onWinKey(e: KeyboardEvent): void {
+    if (drag && e.key === "Escape") {
+      e.stopPropagation();
+      cancelDrag();
+    }
+  }
+
+  function onChipClick(e: MouseEvent, seg: Segment): void {
+    if (suppressClick) {
+      e.stopPropagation();
+      return;
+    }
+    openEvent(seg.ev, seg.color, e.currentTarget as Element);
+  }
+
+  function ghostLabel(d: DragState): string {
+    const dayMs = parseDateKey(d.dayKey).getTime();
+    const s = new Date(dayMs + d.startMin * 60_000);
+    const e = new Date(dayMs + d.endMin * 60_000);
+    return `${fmtTime(s)} – ${fmtTime(e)}`;
+  }
+
   /** Video-call URL, offered on the card while ongoing or within 15 min of start. */
   function joinableUrl(ev: EventInstance): string | undefined {
     const url = Object.values(ev.virtualLocations ?? {}).find((v) => v.uri)?.uri;
@@ -276,6 +459,13 @@
     globalThis.open(url, "_blank", "noopener");
   }
 </script>
+
+<svelte:window
+  onpointermove={onWinMove}
+  onpointerup={onWinUp}
+  onpointercancel={cancelDrag}
+  onkeydown={onWinKey}
+/>
 
 <div class="week">
   <div class="scroll" bind:this={scroller}>
@@ -329,7 +519,14 @@
           {/each}
         </div>
         {#each lanes as lane (dateKey(lane.day))}
-          <div class="day-col" class:today={isToday(lane.day)}>
+          <!-- svelte-ignore a11y_no_static_element_interactions -->
+          <div
+            class="day-col"
+            class:today={isToday(lane.day)}
+            class:painting={drag !== null}
+            data-day={dateKey(lane.day)}
+            onpointerdown={onColDown}
+          >
             {#each ghostsFor(lane.day) as ghost (ghost.g.baseEventId + ghost.g.recurrenceId)}
               <div
                 class="ghost"
@@ -352,13 +549,16 @@
                 class:declined={isDeclined(seg.ev)}
                 class:cont-start={seg.contStart}
                 class:cont-end={seg.contEnd}
+                class:dragging={drag?.moved && drag.ev?.id === seg.ev.id}
+                class:pending={mut.pendingIds[seg.ev.id]}
                 style:--ev={seg.color}
                 style:top="{(seg.startMin / 60) * hourPx}px"
                 style:height="{segHeight(seg)}px"
                 style:left="calc({(seg.col / seg.cols) * 100}% + 1px)"
                 style:width="calc({(seg.span / seg.cols) * 100}% - 3px)"
                 title={segLabel(seg)}
-                onclick={(e) => openEvent(seg.ev, seg.color, e.currentTarget)}
+                onpointerdown={(e) => onChipDown(e, seg)}
+                onclick={(e) => onChipClick(e, seg)}
               >
                 <span class="ev-line">
                   <span class="ev-title">{seg.ev.title || "(untitled)"}</span>
@@ -388,8 +588,26 @@
                     onkeydown={(e) => e.key === "Enter" && openJoin(e, joinableUrl(seg.ev)!)}
                   >Join</span>
                 {/if}
+                {#if eventWritable(seg.ev) && !seg.contEnd && segHeight(seg) >= 24}
+                  <span class="resize-handle" aria-hidden="true"></span>
+                {/if}
               </button>
             {/each}
+            {#if drag && drag.dayKey === dateKey(lane.day)}
+              {@const gTop = Math.max(0, drag.startMin)}
+              {@const gEnd = Math.min(1440, Math.max(drag.endMin, gTop + SNAP))}
+              <div
+                class="drag-ghost"
+                style:--ev={drag.color}
+                style:top="{(gTop / 60) * hourPx}px"
+                style:height="{Math.max(((gEnd - gTop) / 60) * hourPx - 2, 12)}px"
+              >
+                <span class="dg-title">
+                  {drag.mode === "create" ? "(new event)" : drag.ev?.title || "(untitled)"}
+                </span>
+                <span class="dg-time">{ghostLabel(drag)}</span>
+              </div>
+            {/if}
             {#if isToday(lane.day)}
               <div class="now" style:top="{(nowMin / 60) * hourPx}px"></div>
             {/if}
@@ -765,6 +983,79 @@
     border-bottom-left-radius: 0;
     border-bottom-right-radius: 0;
     border-bottom: 2px dotted var(--ev);
+  }
+
+  /* --- direct manipulation ------------------------------------------------------------- */
+
+  .day-col.painting {
+    user-select: none;
+    cursor: default;
+  }
+
+  .event.dragging {
+    opacity: 0.35;
+  }
+
+  .event.pending {
+    opacity: 0.55;
+    pointer-events: none;
+  }
+
+  .resize-handle {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: 7px;
+    cursor: ns-resize;
+  }
+
+  .resize-handle::after {
+    content: "";
+    position: absolute;
+    left: 50%;
+    bottom: 2px;
+    width: 18px;
+    height: 2px;
+    transform: translateX(-50%);
+    border-radius: 2px;
+    background: var(--ev);
+    opacity: 0;
+    transition: opacity 0.1s ease;
+  }
+
+  .event:hover .resize-handle::after {
+    opacity: 0.7;
+  }
+
+  .drag-ghost {
+    position: absolute;
+    left: 1px;
+    right: 2px;
+    z-index: 9;
+    background: color-mix(in oklab, var(--ev) 30%, var(--ground));
+    border: 1.5px dashed var(--ev);
+    border-radius: 4px;
+    padding: 2px 5px;
+    font-size: 0.72rem;
+    line-height: 1.25;
+    overflow: hidden;
+    pointer-events: none;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .dg-title {
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .dg-time {
+    color: var(--ink-soft);
+    font-size: 0.68rem;
+    font-variant-numeric: tabular-nums;
   }
 
   .now {

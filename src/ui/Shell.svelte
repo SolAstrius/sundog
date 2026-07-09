@@ -32,17 +32,21 @@
     toggleKeywordFilter,
     type ViewKind,
   } from "../state/app.svelte.ts";
+  import { deleteInstance, eventWritable, mut, undoLast } from "../state/mutations.svelte.ts";
   import { persistSettings, settings } from "../state/settings.svelte.ts";
   import AgendaView from "./AgendaView.svelte";
+  import EventEditor from "./EventEditor.svelte";
   import EventPopover from "./EventPopover.svelte";
   import MiniMonth from "./MiniMonth.svelte";
   import MonthView from "./MonthView.svelte";
   import NowBar from "./NowBar.svelte";
   import PlannerView from "./PlannerView.svelte";
-  import { closePopover, openEvent, pop } from "./popover.svelte.ts";
+  import { closePopover, openEditor, openEvent, pop } from "./popover.svelte.ts";
   import SearchPanel from "./SearchPanel.svelte";
   import SettingsPanel from "./SettingsPanel.svelte";
+  import UndoToast from "./UndoToast.svelte";
   import WeekView from "./WeekView.svelte";
+  import WriteDialog from "./WriteDialog.svelte";
   import YearView from "./YearView.svelte";
 
   let initError = $state("");
@@ -130,9 +134,43 @@
     navigate("/login", true);
   }
 
+  /** New event via `c`: next hour when today is in view, otherwise noon on the anchor day. */
+  function openCreateDefault() {
+    const now = new Date();
+    const anchorD = parseDateKey(app.anchor);
+    const todayInView = dateKey(now) === app.anchor ||
+      (app.view === "week" && startOfWeek(now).getTime() === startOfWeek(anchorD).getTime());
+    const start = todayInView ? new Date(now) : new Date(anchorD);
+    start.setMinutes(0, 0, 0);
+    if (todayInView) start.setHours(start.getHours() + 1);
+    else start.setHours(12);
+    openEditor({ startMs: start.getTime(), endMs: start.getTime() + 3_600_000, allDay: false });
+  }
+
+  function editOpenEvent() {
+    const ev = pop.ev;
+    if (pop.kind !== "event" || !ev || !eventWritable(ev)) return;
+    const startMs = new Date(ev.utcStart).getTime();
+    const endMs = new Date(ev.utcEnd).getTime();
+    const allDay = ev.showWithoutTime || endMs - startMs >= 86_400_000;
+    openEditor({ ev, startMs, endMs, allDay }, pop.anchor);
+  }
+
+  async function deleteOpenEvent() {
+    const ev = pop.ev;
+    if (pop.kind !== "event" || !ev || !eventWritable(ev) || mut.busy) return;
+    if (await deleteInstance(ev)) closePopover();
+  }
+
   function onKey(e: KeyboardEvent) {
     const t = e.target as HTMLElement | null;
     if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
+    if (mut.dialog) return; // the write dialog owns the keyboard
+    if ((e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === "z") {
+      e.preventDefault();
+      void undoLast();
+      return;
+    }
     if (e.metaKey || e.ctrlKey || e.altKey) return;
     if (e.key === "Escape") {
       if (pop.kind !== "closed") closePopover();
@@ -168,6 +206,20 @@
         break;
       case "d":
         setView("planner");
+        break;
+      case "c":
+        openCreateDefault();
+        break;
+      case "e":
+        editOpenEvent();
+        break;
+      case "Delete":
+      case "Backspace":
+        if (pop.kind !== "event") return;
+        void deleteOpenEvent();
+        break;
+      case "z":
+        void undoLast();
         break;
       case "/":
         searchOpen = true;
@@ -329,7 +381,8 @@
           </label>
         </section>
         <footer class="hints">
-          <kbd>t</kbd> today · <kbd>j</kbd>/<kbd>k</kbd> move · <kbd>w</kbd>
+          <kbd>c</kbd> new · <kbd>e</kbd> edit · <kbd>z</kbd> undo · <kbd>t</kbd> today ·
+          <kbd>j</kbd>/<kbd>k</kbd> move · <kbd>w</kbd>
           <kbd>m</kbd> <kbd>a</kbd> <kbd>y</kbd> <kbd>d</kbd> views · <kbd>/</kbd> search
         </footer>
       </aside>
@@ -369,6 +422,9 @@
   </div>
 
   <EventPopover />
+  <EventEditor />
+  <WriteDialog />
+  <UndoToast />
   {#if searchOpen}
     <SearchPanel onclose={() => (searchOpen = false)} />
   {/if}

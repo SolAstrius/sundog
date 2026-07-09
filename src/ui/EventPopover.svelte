@@ -12,7 +12,9 @@
   import Lock from "@lucide/svelte/icons/lock";
   import MapPin from "@lucide/svelte/icons/map-pin";
   import Paperclip from "@lucide/svelte/icons/paperclip";
+  import Pencil from "@lucide/svelte/icons/pencil";
   import Repeat from "@lucide/svelte/icons/repeat";
+  import Trash2 from "@lucide/svelte/icons/trash-2";
   import Users from "@lucide/svelte/icons/users";
   import Video from "@lucide/svelte/icons/video";
   import X from "@lucide/svelte/icons/x";
@@ -31,20 +33,44 @@
   import { fmtSecondary } from "../lib/altcal.ts";
   import { BROWSER_TZ } from "../lib/dates.ts";
   import {
+    directionsUrl,
     fmtRange,
     fmtTimeInZone,
+    geoToLatLon,
     geoToMapUrl,
     htmlToText,
     humanizeOffset,
     linkify,
   } from "../lib/format.ts";
+  import { cachedGeocode, geocode, type GeoPoint } from "../lib/geocode.ts";
+  import LocationMap, { type MapPoint } from "./LocationMap.svelte";
   import { downloadIcs } from "../lib/ics.ts";
   import { describeRecurrence } from "../lib/recurrence.ts";
   import { app, ownParticipationStatus } from "../state/app.svelte.ts";
+  import { deleteInstance, eventWritable, mut } from "../state/mutations.svelte.ts";
   import { buildColorMap, eventColor } from "../lib/colors.ts";
-  import { closePopover, openEvent, pop } from "./popover.svelte.ts";
+  import { closePopover, openEditor, openEvent, pop } from "./popover.svelte.ts";
 
   const normalize = stalwartProvider().normalize;
+
+  // --- M1 write verbs -------------------------------------------------------------------------
+
+  const writable = $derived(pop.ev ? eventWritable(pop.ev) : false);
+
+  function editThis(): void {
+    const current = pop.ev;
+    if (!current) return;
+    const startMs = new Date(current.utcStart).getTime();
+    const endMs = new Date(current.utcEnd).getTime();
+    const allDay = current.showWithoutTime || endMs - startMs >= 86_400_000;
+    openEditor({ ev: current, startMs, endMs, allDay }, pop.anchor);
+  }
+
+  async function deleteThis(): Promise<void> {
+    const current = pop.ev;
+    if (!current || mut.busy) return;
+    if (await deleteInstance(current)) closePopover();
+  }
 
   const ev = $derived(pop.ev);
   const isAllDay = $derived.by(() => {
@@ -168,16 +194,18 @@
   const ownStatus = $derived(ev ? ownParticipationStatus(ev) : undefined);
 
   interface LocEntry {
+    key: string;
     label: string;
     loc: EventLocation;
     /** Wall time at that location for its relativeTo instant (travel events). */
     localTime?: string;
     mapUrl?: string;
+    directions?: string;
   }
 
   const locationEntries = $derived.by((): LocEntry[] => {
     if (!ev?.locations) return [];
-    return Object.values(ev.locations).map((loc) => {
+    return Object.entries(ev.locations).map(([key, loc]) => {
       const label = loc.relativeTo === "start"
         ? "Departure"
         : loc.relativeTo === "end"
@@ -188,11 +216,51 @@
         ? `${fmtTimeInZone(new Date(instant), loc.timeZone)} local`
         : undefined;
       return {
+        key,
         label,
         loc,
         localTime,
         mapUrl: loc.coordinates ? geoToMapUrl(loc.coordinates) : undefined,
+        directions: directionsUrl(loc),
       };
+    });
+  });
+
+  // --- map: coordinate pins + on-demand geocoded pins, row↔pin hover coordination -------------
+
+  /** Per-location geocode state for entries without geo: coordinates. */
+  let geocoded = $state<Record<string, GeoPoint | "pending" | "failed">>({});
+  let hoveredLocKey = $state<string | null>(null);
+
+  // New event → reset, then auto-pin places this browser has geocoded before (cache is sync).
+  $effect(() => {
+    const entries = locationEntries;
+    const fresh: Record<string, GeoPoint | "pending" | "failed"> = {};
+    for (const entry of entries) {
+      if (entry.loc.coordinates || !entry.loc.name) continue;
+      const hit = cachedGeocode(entry.loc.name);
+      if (hit) fresh[entry.key] = hit;
+    }
+    geocoded = fresh;
+    hoveredLocKey = null;
+  });
+
+  async function locate(entry: LocEntry): Promise<void> {
+    const name = entry.loc.name;
+    if (!name || geocoded[entry.key]) return;
+    geocoded = { ...geocoded, [entry.key]: "pending" };
+    const ll = await geocode(name);
+    geocoded = { ...geocoded, [entry.key]: ll ?? "failed" };
+  }
+
+  const mapPoints = $derived.by((): MapPoint[] => {
+    return locationEntries.flatMap((entry): MapPoint[] => {
+      const base = { key: entry.key, label: entry.label, name: entry.loc.name };
+      const ll = entry.loc.coordinates ? geoToLatLon(entry.loc.coordinates) : undefined;
+      if (ll) return [{ ...base, ...ll }];
+      const found = geocoded[entry.key];
+      if (found && found !== "pending" && found !== "failed") return [{ ...base, ...found }];
+      return [];
     });
   });
 
@@ -451,6 +519,20 @@
             </p>
           {/if}
         </div>
+        {#if writable}
+          <button class="btn icon close" onclick={editThis} aria-label="Edit event" title="Edit (e)">
+            <Pencil size={15} />
+          </button>
+          <button
+            class="btn icon close"
+            onclick={deleteThis}
+            aria-label="Delete event"
+            title="Delete"
+            disabled={mut.busy}
+          >
+            <Trash2 size={15} />
+          </button>
+        {/if}
         <button class="btn icon close" onclick={closePopover} aria-label="Close">
           <X size={16} />
         </button>
@@ -535,8 +617,14 @@
           {/each}
         {/if}
 
-        {#each locationEntries as entry, i (i)}
-          <div class="row">
+        {#each locationEntries as entry (entry.key)}
+          <!-- svelte-ignore a11y_no_static_element_interactions -->
+          <div
+            class="row loc-row"
+            class:hot={hoveredLocKey === entry.key}
+            onmouseenter={() => (hoveredLocKey = entry.key)}
+            onmouseleave={() => (hoveredLocKey = null)}
+          >
             <span class="row-icon" aria-hidden="true"><MapPin size={15} /></span>
             <div>
               <p class="row-title">
@@ -550,6 +638,21 @@
                 {#if entry.mapUrl}
                   <a href={entry.mapUrl} target="_blank" rel="noopener noreferrer">Map</a>
                 {/if}
+                {#if entry.directions}
+                  <a href={entry.directions} target="_blank" rel="noopener noreferrer">
+                    Directions
+                  </a>
+                {/if}
+                {#if !entry.loc.coordinates && entry.loc.name && geocoded[entry.key] !== "failed"}
+                  {@const found = geocoded[entry.key]}
+                  {#if !found}
+                    <button class="linkish" onclick={() => locate(entry)}>Show on map</button>
+                  {:else if found === "pending"}
+                    <span class="soft">Locating…</span>
+                  {/if}
+                {:else if geocoded[entry.key] === "failed"}
+                  <span class="soft">Place not found</span>
+                {/if}
                 {#each Object.values(entry.loc.links ?? {}) as link, j (j)}
                   {#if link.href}
                     <a href={link.href} target="_blank" rel="noopener noreferrer">
@@ -561,6 +664,16 @@
             </div>
           </div>
         {/each}
+
+        {#if mapPoints.length}
+          <div class="map-row">
+            <LocationMap
+              points={mapPoints}
+              highlightKey={hoveredLocKey}
+              onHover={(key) => (hoveredLocKey = key)}
+            />
+          </div>
+        {/if}
 
         {#if attachments.length}
           <div class="row">
@@ -981,6 +1094,23 @@
     gap: 0.3rem 0.7rem;
     font-size: 0.8rem;
     margin-top: 0.15rem;
+  }
+
+  /* Align the inline map with row content (icon column + gap). */
+  .map-row {
+    margin: -0.25rem 0 0 1.8rem;
+  }
+
+  /* Row ↔ pin hover coordination */
+  .loc-row {
+    border-radius: 6px;
+    margin: 0 -0.3rem;
+    padding: 0 0.3rem;
+    transition: background 0.12s;
+  }
+
+  .loc-row.hot {
+    background: color-mix(in oklab, var(--ev, var(--amber)) 9%, transparent);
   }
 
   a {

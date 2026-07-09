@@ -20,11 +20,43 @@ export function htmlToText(html: string): string {
   return new DOMParser().parseFromString(html, "text/html").body.textContent ?? "";
 }
 
-/** "geo:41.84,23.48;u=30" → OpenStreetMap URL, or undefined when unparsable. */
-export function geoToMapUrl(coordinates: string): string | undefined {
+/** "geo:41.84,23.48;u=30" → { lat, lon, u? } (u = RFC 5870 uncertainty in meters). */
+export function geoToLatLon(
+  coordinates: string,
+): { lat: number; lon: number; u?: number } | undefined {
   const m = coordinates.match(/^geo:(-?[\d.]+),(-?[\d.]+)/i);
   if (!m) return undefined;
-  return `https://www.openstreetmap.org/?mlat=${m[1]}&mlon=${m[2]}#map=17/${m[1]}/${m[2]}`;
+  const lat = Number(m[1]);
+  const lon = Number(m[2]);
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return undefined;
+  const um = coordinates.match(/;u=(\d+(?:\.\d+)?)/i);
+  const u = um ? Number(um[1]) : undefined;
+  return Number.isFinite(u) ? { lat, lon, u } : { lat, lon };
+}
+
+/**
+ * Directions to a place: Apple Maps universal link on Apple platforms (opens the native app),
+ * Google Maps elsewhere. Coordinates win; falls back to the place name as the query.
+ */
+export function directionsUrl(
+  dest: { coordinates?: string; name?: string },
+): string | undefined {
+  const ll = dest.coordinates ? geoToLatLon(dest.coordinates) : undefined;
+  const name = dest.name?.trim();
+  // A URL-shaped "place" (meet links stored as locations) is not routable.
+  const target = ll ? `${ll.lat},${ll.lon}` : /^https?:\/\//i.test(name ?? "") ? undefined : name;
+  if (!target) return undefined;
+  const apple = /Mac|iPhone|iPad|iPod/.test(navigator.platform || navigator.userAgent);
+  return apple
+    ? `https://maps.apple.com/?daddr=${encodeURIComponent(target)}`
+    : `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(target)}`;
+}
+
+/** "geo:41.84,23.48;u=30" → OpenStreetMap URL, or undefined when unparsable. */
+export function geoToMapUrl(coordinates: string): string | undefined {
+  const ll = geoToLatLon(coordinates);
+  if (!ll) return undefined;
+  return `https://www.openstreetmap.org/?mlat=${ll.lat}&mlon=${ll.lon}#map=17/${ll.lat}/${ll.lon}`;
 }
 
 const DUR_RE = /^([+-])?P(?:(\d+)W)?(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+(?:\.\d+)?)S)?)?$/;
